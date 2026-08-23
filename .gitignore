@@ -2,11 +2,16 @@
 /bin/
 /dist/
 *.exe
+/spine
+/gitspine
 
 # Node
-node_modules/
 web/node_modules/
 web/dist/
+
+# Fixture / demo repos
+/testdata/fixture-repo/
+/testdata/demo-repo/
 
 # IDE / OS
 .idea/
