@@ -15,6 +15,14 @@ import (
 	"github.com/byo/gitspine/internal/gitrepo"
 )
 
+// Set by GoReleaser via -ldflags at release time.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+	builtBy = "source"
+)
+
 func main() {
 	repoPath := flag.String("repo", ".", "path to local git repository")
 	ref := flag.String("ref", "", "integration ref (default: HEAD branch / main / master)")
@@ -22,7 +30,13 @@ func main() {
 	logLevel := flag.String("log-level", "info", "log level (debug|info|warn|error)")
 	dev := flag.Bool("dev", false, "dev mode: enable CORS for Vite (http://127.0.0.1:5173)")
 	noUI := flag.Bool("no-ui", false, "serve API only (skip embedded web UI)")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("gitspine %s (commit %s, built %s by %s)\n", version, commit, date, builtBy)
+		return
+	}
 
 	// Env override for CI/scripts: GITSPINE_DEV=1
 	if v := strings.TrimSpace(os.Getenv("GITSPINE_DEV")); v == "1" || strings.EqualFold(v, "true") {

@@ -17,16 +17,16 @@ import (
 
 // Commit is a lightweight commit summary.
 type Commit struct {
-	OID          string    `json:"oid"`
-	ShortOID     string    `json:"shortOid"`
-	Subject      string    `json:"subject"`
-	Body         string    `json:"body,omitempty"`
-	AuthorName   string    `json:"authorName"`
-	AuthorEmail  string    `json:"authorEmail"`
-	AuthorTime   time.Time `json:"authorTime"`
-	Parents      []string  `json:"parents"`
-	IsMerge      bool      `json:"isMerge"`
-	Refs         []string  `json:"refs,omitempty"`
+	OID         string    `json:"oid"`
+	ShortOID    string    `json:"shortOid"`
+	Subject     string    `json:"subject"`
+	Body        string    `json:"body,omitempty"`
+	AuthorName  string    `json:"authorName"`
+	AuthorEmail string    `json:"authorEmail"`
+	AuthorTime  time.Time `json:"authorTime"`
+	Parents     []string  `json:"parents"`
+	IsMerge     bool      `json:"isMerge"`
+	Refs        []string  `json:"refs,omitempty"`
 }
 
 // Capsule summarizes a collapsed feature attached to a landing merge.
@@ -65,7 +65,7 @@ type ExternalNode struct {
 type FeatureSubgraph struct {
 	MergeOID    string         `json:"mergeOid"`
 	FirstParent string         `json:"firstParent"` // M^1 integration parent
-	Commits     []Commit       `json:"commits"`    // in-bundle feature commits
+	Commits     []Commit       `json:"commits"`     // in-bundle feature commits
 	Edges       []Edge         `json:"edges"`
 	Tips        []string       `json:"tips"` // non-first parents of merge
 	Externals   []ExternalNode `json:"externals"`
@@ -77,9 +77,9 @@ type FeatureSubgraph struct {
 // CommitOrigin locates a commit relative to the integration first-parent spine.
 // Used to jump from a boundary/external node into the feature that introduced it.
 type CommitOrigin struct {
-	OID            string `json:"oid"`
-	OnSpine        bool   `json:"onSpine"`
-	SpineIndex     *int   `json:"spineIndex,omitempty"`     // if onSpine
+	OID              string `json:"oid"`
+	OnSpine          bool   `json:"onSpine"`
+	SpineIndex       *int   `json:"spineIndex,omitempty"`       // if onSpine
 	IntroducingMerge string `json:"introducingMerge,omitempty"` // landing merge that brought oid in
 	// Spine index of the introducing merge (for window seek).
 	IntroducingSpineIndex *int `json:"introducingSpineIndex,omitempty"`
@@ -342,30 +342,21 @@ func (r *Repo) ExpandFeature(ctx context.Context, mergeOID string, maxCommits in
 	const maxBoundary = 16
 	boundaryN := 0
 	for _, c := range commits {
-		hasInBundleParent := false
-		for _, p := range c.Parents {
-			if _, ok := inBundle[p]; ok {
-				hasInBundleParent = true
-				break
-			}
-		}
 		for i, p := range c.Parents {
 			if _, ok := inBundle[p]; ok {
 				edges = append(edges, Edge{From: c.OID, To: p, Kind: "internal"})
 				continue
 			}
 			// Outside the feature bundle.
-			role := "base"
+			var role string
 			if p == first || onFPSpine(p) {
 				// Points at the integration rail → violet "on main" treatment.
 				role = "integration"
 			} else if i >= 1 {
 				// Non-first parent from outside ≈ merge-in (e.g. merge topic into feature).
 				role = "synced"
-			} else if !hasInBundleParent {
-				// Root of the feature history — true off-rail branch starting point.
-				role = "base"
 			} else {
+				// Off-rail parent: feature root, or another external first-parent.
 				role = "base"
 			}
 			setRole(p, role)
@@ -517,35 +508,6 @@ func (r *Repo) ensureSpineCache(ctx context.Context, tip string) error {
 	return nil
 }
 
-// isAncestor reports whether a is an ancestor of b (or a == b).
-func (r *Repo) isAncestor(ctx context.Context, a, b string) bool {
-	if a == b {
-		return true
-	}
-	return r.runExit(ctx, "merge-base", "--is-ancestor", a, b) == nil
-}
-
-// isFirstParentAncestor reports whether a lies on the first-parent chain of tip.
-func (r *Repo) isFirstParentAncestor(ctx context.Context, a, tip string) bool {
-	if err := r.ensureSpineCache(ctx, tip); err != nil {
-		return false
-	}
-	_, ok := r.spineIndex[a]
-	return ok
-}
-
-// firstParentIndex returns spineIndex of commit on the first-parent walk of tip
-// (0 = tip). Error if commit is not on that walk.
-func (r *Repo) firstParentIndex(ctx context.Context, commit, tip string) (int, error) {
-	if err := r.ensureSpineCache(ctx, tip); err != nil {
-		return 0, err
-	}
-	if idx, ok := r.spineIndex[commit]; ok {
-		return idx, nil
-	}
-	return 0, fmt.Errorf("not on first-parent spine")
-}
-
 // firstParentSpineSet returns OIDs on the first-parent walk from tip (newest→oldest).
 func (r *Repo) firstParentSpineSet(ctx context.Context, tip string) map[string]struct{} {
 	out := make(map[string]struct{})
@@ -564,13 +526,6 @@ func (r *Repo) firstParentSpineSet(ctx context.Context, tip string) map[string]s
 		out[oid] = struct{}{}
 	}
 	return out
-}
-
-// runExit runs git and returns only the error (for merge-base --is-ancestor).
-func (r *Repo) runExit(ctx context.Context, args ...string) error {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = r.Path
-	return cmd.Run()
 }
 
 // GetCommit loads one commit (single object; prefer batch paths for lists).
@@ -646,7 +601,7 @@ func (r *Repo) commitsByOID(ctx context.Context, oids []string) (map[string]Comm
 		// Fallback: empty map, caller may GetCommit individually.
 		return out, nil
 	}
-	for _, rec := range strings.Split(raw, "\x1e") {
+	for rec := range strings.SplitSeq(raw, "\x1e") {
 		rec = strings.TrimSpace(rec)
 		if rec == "" {
 			continue
@@ -727,7 +682,7 @@ func parseDecorations(d string) []string {
 		return nil
 	}
 	var refs []string
-	for _, part := range strings.Split(d, ", ") {
+	for part := range strings.SplitSeq(d, ", ") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
@@ -826,14 +781,14 @@ func hintTitle(subject string) string {
 	s := subject
 	if i := strings.Index(s, "'"); i >= 0 {
 		rest := s[i+1:]
-		if j := strings.Index(rest, "'"); j >= 0 {
-			return rest[:j]
+		if before, _, ok := strings.Cut(rest, "'"); ok {
+			return before
 		}
 	}
 	if i := strings.Index(s, "\""); i >= 0 {
 		rest := s[i+1:]
-		if j := strings.Index(rest, "\""); j >= 0 {
-			return rest[:j]
+		if before, _, ok := strings.Cut(rest, "\""); ok {
+			return before
 		}
 	}
 	// fallback: trim Merge prefix
@@ -881,7 +836,7 @@ func splitNonEmpty(s string) []string {
 		return nil
 	}
 	var out []string
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" {
 			out = append(out, line)

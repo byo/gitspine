@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -64,7 +65,7 @@ func TestSpineAndExpandAgainstFixture(t *testing.T) {
 				if want == "HEAD" {
 					continue
 				}
-				if !containsStr(refs, want) {
+				if !slices.Contains(refs, want) {
 					t.Errorf("commit %s missing ref %q; have %v", shortTest(oid), want, refs)
 				}
 			}
@@ -135,15 +136,6 @@ func parseInt(s string, n *int) (int, error) {
 	}
 	*n = v
 	return v, nil
-}
-
-func containsStr(ss []string, want string) bool {
-	for _, s := range ss {
-		if s == want {
-			return true
-		}
-	}
-	return false
 }
 
 func shortTest(oid string) string {

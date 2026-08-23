@@ -1,4 +1,4 @@
-.PHONY: fixture ensure-ui web dev-api dev-web dev test build build-go clean-ui
+.PHONY: fixture ensure-ui web dev-api dev-web dev test build build-go clean-ui lint vet
 
 FIXTURE ?= testdata/fixture-repo
 REPO ?= $(FIXTURE)
@@ -53,6 +53,20 @@ build: web build-go
 clean-ui:
 	rm -rf $(UI_DIST)
 	@$(MAKE) ensure-ui
+
+lint: ensure-ui
+	golangci-lint run ./...
+	cd web && npm run lint
+
+vet: ensure-ui
+	go mod tidy
+	@if [ -n "$$(git status --porcelain -- go.mod go.sum)" ]; then \
+		echo "go.mod / go.sum is not tidy; run: go mod tidy"; \
+		git status --porcelain -- go.mod go.sum; \
+		exit 1; \
+	fi
+	go vet ./...
+	cd web && npm run typecheck
 
 test: ensure-ui
 	go test ./...
