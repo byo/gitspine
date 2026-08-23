@@ -73,6 +73,16 @@ jobs:
           mkdir -p internal/ui/dist
           cp internal/ui/placeholder/index.html internal/ui/dist/index.html
 
+      - name: go mod tidy
+        run: |
+          go mod tidy
+          if [ -n "$(git status --porcelain -- go.mod go.sum)" ]; then
+            echo "go.mod / go.sum is not tidy; run: go mod tidy"
+            git diff -- go.mod go.sum
+            git status --porcelain -- go.mod go.sum
+            exit 1
+          fi
+
       - name: go vet
         run: go vet ./...
 

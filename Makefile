@@ -59,6 +59,12 @@ lint: ensure-ui
 	cd web && npm run lint
 
 vet: ensure-ui
+	go mod tidy
+	@if [ -n "$$(git status --porcelain -- go.mod go.sum)" ]; then \
+		echo "go.mod / go.sum is not tidy; run: go mod tidy"; \
+		git status --porcelain -- go.mod go.sum; \
+		exit 1; \
+	fi
 	go vet ./...
 	cd web && npm run typecheck
 

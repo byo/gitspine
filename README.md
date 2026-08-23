@@ -126,8 +126,8 @@ docs/DESIGN.md       architecture & PR plan
 ## Checks
 
 ```bash
-make lint    # golangci-lint + oxlint
-make vet     # go vet + tsc -b
+make lint    # golangci-lint (includes gofmt) + oxlint
+make vet     # go mod tidy, go vet, tsc -b
 make test    # go test ./... (needs `make fixture` for gitrepo tests)
 ```
 

@@ -6,6 +6,9 @@ linters:
 formatters:
   enable:
     - gofmt
+  settings:
+    gofmt:
+      simplify: true
 
 run:
   modules-download-mode: readonly
