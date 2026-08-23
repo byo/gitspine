@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -71,6 +72,17 @@ type FeatureSubgraph struct {
 	// Truncated is true when the feature bundle hit the commit cap; roots may be
 	// artificial cut points rather than the true branch start.
 	Truncated bool `json:"truncated"`
+}
+
+// CommitOrigin locates a commit relative to the integration first-parent spine.
+// Used to jump from a boundary/external node into the feature that introduced it.
+type CommitOrigin struct {
+	OID            string `json:"oid"`
+	OnSpine        bool   `json:"onSpine"`
+	SpineIndex     *int   `json:"spineIndex,omitempty"`     // if onSpine
+	IntroducingMerge string `json:"introducingMerge,omitempty"` // landing merge that brought oid in
+	// Spine index of the introducing merge (for window seek).
+	IntroducingSpineIndex *int `json:"introducingSpineIndex,omitempty"`
 }
 
 // Repo is an open local git repository.
@@ -147,7 +159,8 @@ func (r *Repo) Spine(ctx context.Context, tip string, limit, offset int, withCap
 
 	// One process: commit fields for limit+1 first-parent commits.
 	// Record separator %x1e between commits; field separator %x1f.
-	const fmtStr = "%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%s%x1e"
+	// %D carries branch/tag decorations (same as git log --decorate).
+	const fmtStr = "%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%s%x1f%D%x1e"
 	args := []string{
 		"log", "--first-parent",
 		"--skip=" + strconv.Itoa(offset),
@@ -180,11 +193,9 @@ func (r *Repo) Spine(ctx context.Context, tip string, limit, offset int, withCap
 		commits = commits[:limit]
 	}
 
-	refs, err := r.refIndex(ctx)
-	if err != nil {
-		// Non-fatal: decorate without refs.
-		refs = nil
-	}
+	// Merge %D decorations with full ref index (covers remotes/tags and any
+	// refs that log decoration omitted).
+	r.decorateCommits(ctx, commits)
 
 	// Capsule counts are expensive (one rev-list per merge). Cap how many we
 	// compute per page so Linux histories stay interactive.
@@ -196,9 +207,6 @@ func (r *Repo) Spine(ctx context.Context, tip string, limit, offset int, withCap
 
 	nodes := make([]SpineNode, 0, len(commits))
 	for i, c := range commits {
-		if refs != nil {
-			c.Refs = refs[c.OID]
-		}
 		node := SpineNode{Commit: c, Index: offset + i}
 		if withCapsules && c.IsMerge {
 			if capsuleBudget > 0 {
@@ -291,6 +299,7 @@ func (r *Repo) ExpandFeature(ctx context.Context, mergeOID string, maxCommits in
 		}
 		commits = append(commits, c)
 	}
+	r.decorateCommits(ctx, commits)
 
 	// roleRank: higher wins when the same external is referenced multiple ways.
 	roleRank := map[string]int{
@@ -314,6 +323,17 @@ func (r *Repo) ExpandFeature(ctx context.Context, mergeOID string, maxCommits in
 		edges = append(edges, Edge{From: mergeOID, To: t, Kind: "landing"})
 	}
 
+	// First-parent rail of M^1 — parents on this rail are "on main", not a
+	// floating branch-base diamond (even when they are also the feature root).
+	fpSpine := r.firstParentSpineSet(ctx, first)
+	onFPSpine := func(oid string) bool {
+		if oid == "" || oid == first {
+			return true
+		}
+		_, ok := fpSpine[oid]
+		return ok
+	}
+
 	const maxBoundary = 16
 	boundaryN := 0
 	for _, c := range commits {
@@ -331,16 +351,16 @@ func (r *Repo) ExpandFeature(ctx context.Context, mergeOID string, maxCommits in
 			}
 			// Outside the feature bundle.
 			role := "base"
-			if p == first {
+			if p == first || onFPSpine(p) {
+				// Points at the integration rail → violet "on main" treatment.
 				role = "integration"
 			} else if i >= 1 {
-				// Non-first parent from outside ≈ merge-in (e.g. merge main into feature).
+				// Non-first parent from outside ≈ merge-in (e.g. merge topic into feature).
 				role = "synced"
 			} else if !hasInBundleParent {
-				// Root of the feature history — branch starting point.
+				// Root of the feature history — true off-rail branch starting point.
 				role = "base"
 			} else {
-				// First parent outside while also having in-bundle parents (unusual) — treat as base.
 				role = "base"
 			}
 			setRole(p, role)
@@ -353,23 +373,31 @@ func (r *Repo) ExpandFeature(ctx context.Context, mergeOID string, maxCommits in
 
 	// Classic fork point: merge-base(M^1, first tip), if outside the bundle.
 	// If no loaded commit parents directly to it (common when truncated), still
-	// expose it as base and attach a layout edge from the oldest loaded commit.
+	// expose it and attach a layout edge from the oldest loaded commit.
 	var mergeBase string
 	if len(tips) > 0 {
 		if mb, err := r.run(ctx, "merge-base", first, tips[0]); err == nil && mb != "" {
 			mergeBase = mb
 			if _, in := inBundle[mb]; !in {
-				setRole(mb, "base")
+				if onFPSpine(mb) {
+					setRole(mb, "integration")
+				} else {
+					setRole(mb, "base")
+				}
 			}
 		}
 	}
 	if mergeBase != "" {
 		if _, in := inBundle[mergeBase]; !in {
+			role := "base"
+			if r, ok := extRoles[mergeBase]; ok {
+				role = r
+			}
 			hasEdge := false
-			for _, e := range edges {
-				if e.Kind == "boundary" && e.To == mergeBase {
+			for i := range edges {
+				if edges[i].Kind == "boundary" && edges[i].To == mergeBase {
+					edges[i].Role = role
 					hasEdge = true
-					break
 				}
 			}
 			if !hasEdge && len(commits) > 0 {
@@ -379,7 +407,7 @@ func (r *Repo) ExpandFeature(ctx context.Context, mergeOID string, maxCommits in
 					From: oldest,
 					To:   mergeBase,
 					Kind: "boundary",
-					Role: "base",
+					Role: role,
 				})
 			}
 		}
@@ -387,7 +415,6 @@ func (r *Repo) ExpandFeature(ctx context.Context, mergeOID string, maxCommits in
 
 	// Always expose integration parent even with no boundary edge budget left.
 	externals := make([]ExternalNode, 0, len(extRoles))
-	// Stable-ish order: integration, base, synced; then oid.
 	orderRoles := []string{"integration", "base", "synced"}
 	for _, role := range orderRoles {
 		for oid, rname := range extRoles {
@@ -414,22 +441,153 @@ func (r *Repo) ExpandFeature(ctx context.Context, mergeOID string, maxCommits in
 	}, nil
 }
 
+// LocateCommit finds where a commit sits relative to the integration spine and,
+// if it was landed by a feature merge, which merge introduced it.
+func (r *Repo) LocateCommit(ctx context.Context, oid, integrationRef string) (*CommitOrigin, error) {
+	full, err := r.revParse(ctx, oid)
+	if err != nil {
+		return nil, fmt.Errorf("unknown commit: %w", err)
+	}
+	_, tip, err := r.ResolveIntegrationRef(ctx, integrationRef)
+	if err != nil {
+		return nil, err
+	}
+
+	out := &CommitOrigin{OID: full}
+
+	// On first-parent rail?
+	if r.isFirstParentAncestor(ctx, full, tip) {
+		idx, err := r.firstParentIndex(ctx, full, tip)
+		if err == nil {
+			out.OnSpine = true
+			out.SpineIndex = &idx
+		}
+		return out, nil
+	}
+
+	// Introducing landing merge: first first-parent merge M (newest→older) where
+	// oid is ancestor of M but not of M^1.
+	mergesOut, err := r.run(ctx, "rev-list", "--first-parent", "--merges", tip)
+	if err != nil {
+		return out, nil
+	}
+	for _, m := range splitNonEmpty(mergesOut) {
+		// Need first parent of M.
+		p0, err := r.run(ctx, "rev-parse", m+"^")
+		if err != nil || p0 == "" {
+			continue
+		}
+		if !r.isAncestor(ctx, full, m) {
+			continue
+		}
+		if r.isAncestor(ctx, full, p0) {
+			continue // already on main before this merge
+		}
+		out.IntroducingMerge = m
+		if idx, err := r.firstParentIndex(ctx, m, tip); err == nil {
+			out.IntroducingSpineIndex = &idx
+		}
+		return out, nil
+	}
+	return out, nil
+}
+
+// isAncestor reports whether a is an ancestor of b (or a == b).
+func (r *Repo) isAncestor(ctx context.Context, a, b string) bool {
+	if a == b {
+		return true
+	}
+	return r.runExit(ctx, "merge-base", "--is-ancestor", a, b) == nil
+}
+
+// isFirstParentAncestor reports whether a lies on the first-parent chain of tip.
+func (r *Repo) isFirstParentAncestor(ctx context.Context, a, tip string) bool {
+	_, err := r.firstParentIndex(ctx, a, tip)
+	return err == nil
+}
+
+// firstParentIndex returns spineIndex of commit on the first-parent walk of tip
+// (0 = tip). Error if commit is not on that walk.
+func (r *Repo) firstParentIndex(ctx context.Context, commit, tip string) (int, error) {
+	if commit == tip {
+		return 0, nil
+	}
+	// Candidate index: how many first-parent steps from tip down to commit.
+	out, err := r.run(ctx, "rev-list", "--first-parent", "--count", commit+".."+tip)
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return 0, err
+	}
+	// Confirm: skip n from tip along first-parent lands on commit.
+	check, err := r.run(ctx, "rev-list", "--first-parent", "--skip="+strconv.Itoa(n), "-1", tip)
+	if err != nil || check != commit {
+		return 0, fmt.Errorf("not on first-parent spine")
+	}
+	return n, nil
+}
+
+// firstParentSpineSet returns OIDs on the first-parent walk from tip (newest→oldest).
+func (r *Repo) firstParentSpineSet(ctx context.Context, tip string) map[string]struct{} {
+	out := make(map[string]struct{})
+	if tip == "" {
+		return out
+	}
+	raw, err := r.run(ctx, "rev-list", "--first-parent", "--max-count=200000", tip)
+	if err != nil {
+		cur := tip
+		for i := 0; i < 50000; i++ {
+			if _, seen := out[cur]; seen {
+				break
+			}
+			out[cur] = struct{}{}
+			p, err := r.run(ctx, "rev-parse", cur+"^")
+			if err != nil || p == "" || p == cur {
+				break
+			}
+			cur = p
+		}
+		return out
+	}
+	for _, oid := range splitNonEmpty(raw) {
+		out[oid] = struct{}{}
+	}
+	return out
+}
+
+// runExit runs git and returns only the error (for merge-base --is-ancestor).
+func (r *Repo) runExit(ctx context.Context, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = r.Path
+	return cmd.Run()
+}
+
 // GetCommit loads one commit (single object; prefer batch paths for lists).
 func (r *Repo) GetCommit(ctx context.Context, oid string) (Commit, error) {
-	const fmtStr = "%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%s%x1f%b"
+	// body then decorations: H P an ae aI s b D
+	const fmtStr = "%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%s%x1f%b%x1f%D"
 	out, err := r.run(ctx, "show", "-s", "--format="+fmtStr, oid)
 	if err != nil {
 		return Commit{}, err
 	}
-	return parseCommitRecord(strings.TrimSpace(out), true)
+	c, err := parseCommitRecord(strings.TrimSpace(out), true)
+	if err != nil {
+		return Commit{}, err
+	}
+	cs := []Commit{c}
+	r.decorateCommits(ctx, cs)
+	return cs[0], nil
 }
 
 // parseCommitRecord parses a %x1f-separated commit line.
-// With body: H P an ae aI s b ; without body: H P an ae aI s
+// Without body: H P an ae aI s D
+// With body:    H P an ae aI s b D
 func parseCommitRecord(rec string, withBody bool) (Commit, error) {
-	n := 6
+	n := 7
 	if withBody {
-		n = 7
+		n = 8
 	}
 	parts := strings.SplitN(rec, "\x1f", n)
 	if len(parts) < 6 {
@@ -438,8 +596,18 @@ func parseCommitRecord(rec string, withBody bool) (Commit, error) {
 	parents := splitFields(parts[1])
 	at, _ := time.Parse(time.RFC3339, parts[4])
 	body := ""
-	if withBody && len(parts) >= 7 {
-		body = strings.TrimSpace(parts[6])
+	decor := ""
+	if withBody {
+		if len(parts) >= 7 {
+			body = strings.TrimSpace(parts[6])
+		}
+		if len(parts) >= 8 {
+			decor = parts[7]
+		}
+	} else {
+		if len(parts) >= 7 {
+			decor = parts[6]
+		}
 	}
 	full := strings.TrimSpace(parts[0])
 	return Commit{
@@ -452,6 +620,7 @@ func parseCommitRecord(rec string, withBody bool) (Commit, error) {
 		AuthorTime:  at,
 		Parents:     parents,
 		IsMerge:     len(parents) > 1,
+		Refs:        parseDecorations(decor),
 	}, nil
 }
 
@@ -461,7 +630,7 @@ func (r *Repo) commitsByOID(ctx context.Context, oids []string) (map[string]Comm
 	if len(oids) == 0 {
 		return out, nil
 	}
-	const fmtStr = "%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%s%x1e"
+	const fmtStr = "%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%s%x1f%D%x1e"
 	args := append([]string{"log", "--no-walk=sorted", "--format=" + fmtStr}, oids...)
 	raw, err := r.run(ctx, args...)
 	if err != nil {
@@ -482,26 +651,137 @@ func (r *Repo) commitsByOID(ctx context.Context, oids []string) (map[string]Comm
 	return out, nil
 }
 
-// refIndex returns oid → short ref names (heads/tags), cached for the process.
+// decorateCommits merges git %D decorations with the full ref index so every
+// local branch, remote-tracking branch, and tag tip is visible on its commit.
+func (r *Repo) decorateCommits(ctx context.Context, commits []Commit) {
+	if len(commits) == 0 {
+		return
+	}
+	idx, err := r.refIndex(ctx)
+	if err != nil {
+		idx = nil
+	}
+	for i := range commits {
+		var merged []string
+		merged = append(merged, commits[i].Refs...)
+		if idx != nil {
+			merged = append(merged, idx[commits[i].OID]...)
+		}
+		commits[i].Refs = normalizeRefs(merged)
+	}
+}
+
+// refIndex returns commit-oid → short ref names (heads / remotes / tags),
+// cached for the process. Annotated tags are peeled to their target commit.
 func (r *Repo) refIndex(ctx context.Context) (map[string][]string, error) {
 	if r.refsByOID != nil {
 		return r.refsByOID, nil
 	}
-	out, err := r.run(ctx, "for-each-ref", "--format=%(objectname)%x1f%(refname:short)")
+	// %(*objectname) is set for annotated tags (peeled commit); otherwise use objectname.
+	// Limit to heads/remotes/tags — skip stash, notes, replace, etc.
+	out, err := r.run(ctx, "for-each-ref",
+		"--format=%(if)%(*objectname)%(then)%(*objectname)%(else)%(objectname)%(end)%x1f%(refname:short)%x1f%(refname)",
+		"refs/heads", "refs/remotes", "refs/tags",
+	)
 	if err != nil {
 		return nil, err
 	}
 	m := make(map[string][]string)
 	for _, line := range splitNonEmpty(out) {
-		parts := strings.SplitN(line, "\x1f", 2)
-		if len(parts) != 2 {
+		parts := strings.SplitN(line, "\x1f", 3)
+		if len(parts) < 2 {
 			continue
 		}
 		oid, name := parts[0], parts[1]
+		if oid == "" || name == "" {
+			continue
+		}
 		m[oid] = append(m[oid], name)
+	}
+	// Symbolic HEAD tip (helps when HEAD is detached or matches a branch).
+	if headOID, err := r.revParse(ctx, "HEAD"); err == nil && headOID != "" {
+		// Only add the bare "HEAD" label; the branch name is already in heads.
+		m[headOID] = append(m[headOID], "HEAD")
+	}
+	for oid, names := range m {
+		m[oid] = normalizeRefs(names)
 	}
 	r.refsByOID = m
 	return m, nil
+}
+
+// parseDecorations turns git pretty %D into short ref names.
+// Examples: "HEAD -> main, origin/main, tag: v1.0" or "tag: v0.1.0, feat/login".
+func parseDecorations(d string) []string {
+	d = strings.TrimSpace(d)
+	if d == "" {
+		return nil
+	}
+	var refs []string
+	for _, part := range strings.Split(d, ", ") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(part, "HEAD -> "):
+			refs = append(refs, "HEAD")
+			if br := strings.TrimPrefix(part, "HEAD -> "); br != "" {
+				refs = append(refs, br)
+			}
+		case part == "HEAD":
+			refs = append(refs, "HEAD")
+		case strings.HasPrefix(part, "tag: "):
+			refs = append(refs, strings.TrimPrefix(part, "tag: "))
+		default:
+			// Local branch, remote-tracking branch, or other short name.
+			refs = append(refs, part)
+		}
+	}
+	return normalizeRefs(refs)
+}
+
+// normalizeRefs de-duplicates and orders refs for display:
+// HEAD, main/master, other local branches, remotes, tags/other.
+func normalizeRefs(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(in))
+	var out []string
+	for _, r := range in {
+		r = strings.TrimSpace(r)
+		if r == "" {
+			continue
+		}
+		if _, ok := seen[r]; ok {
+			continue
+		}
+		seen[r] = struct{}{}
+		out = append(out, r)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return refRank(out[i]) < refRank(out[j]) ||
+			(refRank(out[i]) == refRank(out[j]) && out[i] < out[j])
+	})
+	return out
+}
+
+func refRank(name string) int {
+	switch {
+	case name == "HEAD":
+		return 0
+	case name == "main" || name == "master" || name == "trunk":
+		return 1
+	case !strings.Contains(name, "/"):
+		// Local branch or lightweight tag short name — branches first-ish.
+		return 2
+	case strings.HasPrefix(name, "origin/") || strings.Count(name, "/") == 1:
+		// remote/branch (single slash is typical for remotes).
+		return 3
+	default:
+		return 4
+	}
 }
 
 func (r *Repo) capsuleForMerge(ctx context.Context, m Commit) (*Capsule, error) {
@@ -561,7 +841,7 @@ func (r *Repo) refsPointingAt(ctx context.Context, oid string) []string {
 	if err != nil {
 		return nil
 	}
-	return m[oid]
+	return append([]string(nil), m[oid]...)
 }
 
 func (r *Repo) revParse(ctx context.Context, rev string) (string, error) {

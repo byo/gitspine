@@ -207,6 +207,30 @@ body,
   line-height: 1.4;
 }
 
+/* Sticky so it stays visible while a slow jump/expand runs on huge repos. */
+.banner.nav-busy {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  background: #1a2e3a;
+  border-bottom: 1px solid #2a4a5a;
+  color: #b8d9ec;
+}
+
+.banner.nav-busy .nav-busy-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.banner.nav-busy .nav-busy-hint {
+  font-size: 0.78rem;
+  color: #8b9bb0;
+  white-space: nowrap;
+}
+
 .btn {
   border: 1px solid #3a4d63;
   background: #1a2430;

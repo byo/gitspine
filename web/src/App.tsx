@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { expandFeature, fetchRepo, fetchSpine, isAbortError } from './api/client'
+import {
+  expandFeature,
+  fetchCommitOrigin,
+  fetchRepo,
+  fetchSpine,
+  isAbortError,
+} from './api/client'
 import type { Commit, FeatureSubgraph, RepoMeta, SpineNode } from './api/types'
 import { SpineCanvas } from './graph/SpineCanvas'
 import type { LayoutHit } from './graph/layout'
@@ -31,6 +37,10 @@ export default function App() {
   const [feature, setFeature] = useState<FeatureSubgraph | null>(null)
   /** Expand request in flight (focus set, subgraph not yet applied). */
   const [featureLoading, setFeatureLoading] = useState(false)
+  /** Jump-to-origin / seek in flight (can be slow on huge repos). */
+  const [navBusy, setNavBusy] = useState<{ oid: string; message: string } | null>(
+    null,
+  )
   const [selectedOid, setSelectedOid] = useState<string | null>(null)
   const [selected, setSelected] = useState<Commit | null>(null)
 
@@ -45,6 +55,9 @@ export default function App() {
   const focusMergeRef = useRef<string | null>(null)
   /** Monotonic token so a late expand response never applies after cancel/switch. */
   const expandTokenRef = useRef(0)
+  /** Monotonic token + AbortController for jump-to-origin navigation. */
+  const jumpTokenRef = useRef(0)
+  const jumpAbortRef = useRef<AbortController | null>(null)
 
   nodesRef.current = nodes
   hasMoreOlderRef.current = hasMoreOlder
@@ -120,7 +133,32 @@ export default function App() {
     [rowPx, syncFlags],
   )
 
+  /** Cancel in-flight jump-to-origin (locate + spine seek). Late results are ignored. */
+  const cancelJump = useCallback(() => {
+    jumpTokenRef.current += 1
+    jumpAbortRef.current?.abort()
+    jumpAbortRef.current = null
+    setNavBusy(null)
+  }, [])
+
+  const clearFeatureFocus = useCallback(() => {
+    // Invalidate any in-flight expand (token + abort via effect cleanup).
+    expandTokenRef.current += 1
+    focusMergeRef.current = null
+    setFocusMergeOid(null)
+    setFeature(null)
+    setFeatureLoading(false)
+  }, [])
+
+  /** Cancel jump + expand and clear selection chrome. */
+  const cancelBackgroundWork = useCallback(() => {
+    cancelJump()
+    clearFeatureFocus()
+  }, [cancelJump, clearFeatureFocus])
+
   const load = useCallback(async () => {
+    cancelJump()
+    clearFeatureFocus()
     setLoading(true)
     setError(null)
     loadingMoreRef.current = false
@@ -139,31 +177,22 @@ export default function App() {
     } finally {
       setLoading(false)
     }
-  }, [syncFlags])
+  }, [cancelJump, clearFeatureFocus, syncFlags])
 
   useEffect(() => {
     void load()
   }, [load])
 
-  const clearFeatureFocus = useCallback(() => {
-    // Invalidate any in-flight expand (token + abort via effect cleanup).
-    expandTokenRef.current += 1
-    focusMergeRef.current = null
-    setFocusMergeOid(null)
-    setFeature(null)
-    setFeatureLoading(false)
-  }, [])
-
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        clearFeatureFocus()
+        cancelBackgroundWork()
         setSelectedOid(null)
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [clearFeatureFocus])
+  }, [cancelBackgroundWork])
 
   /**
    * Expand: focus/dim immediately, fetch with AbortController.
@@ -191,6 +220,8 @@ export default function App() {
         if (focusMergeRef.current !== mergeOid) return
         setFeature(sg)
         setFeatureLoading(false)
+        // Jump-to-origin may still show a spinner on the old node; clear it.
+        setNavBusy(null)
       })
       .catch((e) => {
         if (isAbortError(e)) return
@@ -198,6 +229,7 @@ export default function App() {
         if (focusMergeRef.current !== mergeOid) return
         setFeatureLoading(false)
         setFeature(null)
+        setNavBusy(null)
         // Drop focus so we are not stuck half-open with no subgraph.
         expandTokenRef.current += 1
         focusMergeRef.current = null
@@ -221,12 +253,111 @@ export default function App() {
     setSelected(fromSpine ?? fromFeat ?? fromExt ?? null)
   }, [selectedOid, nodes, feature])
 
+  /**
+   * Jump to the feature that introduced `oid` (expand that landing merge + select).
+   * Used when clicking base/synced externals that live in another feature flow.
+   * Cancelable: a new jump, Esc, or other UI action aborts in-flight work and
+   * ignores late responses so the graph does not “teleport” afterward.
+   */
+  const jumpToCommitOrigin = useCallback(
+    async (oid: string) => {
+      // Cancel any previous jump and in-flight expand so only this navigation applies.
+      jumpAbortRef.current?.abort()
+      const token = ++jumpTokenRef.current
+      const ac = new AbortController()
+      jumpAbortRef.current = ac
+      // Also invalidate expand so a previous expand cannot apply mid-jump.
+      expandTokenRef.current += 1
+
+      const short = oid.slice(0, 7)
+      setError(null)
+      setNavBusy({ oid, message: `Locating ${short}…` })
+
+      const stillCurrent = () =>
+        token === jumpTokenRef.current && !ac.signal.aborted
+
+      try {
+        const loc = await fetchCommitOrigin(oid, ac.signal)
+        if (!stillCurrent()) return
+
+        if (loc.onSpine && loc.spineIndex != null) {
+          const { min, max } = spineIndexRange(nodesRef.current)
+          if (loc.spineIndex < min || loc.spineIndex > max) {
+            setNavBusy({ oid, message: `Loading history around ${short}…` })
+            const half = Math.floor(SPINE_PAGE / 2)
+            const offset = Math.max(0, loc.spineIndex - half)
+            const spine = await fetchSpine(offset, SPINE_PAGE, ac.signal)
+            if (!stillCurrent()) return
+            applyWindow(spine.nodes, 'none')
+            serverHasMoreRef.current = spine.hasMore
+            syncFlags(nodesRef.current)
+          }
+          if (!stillCurrent()) return
+          clearFeatureFocus()
+          setSelectedOid(oid)
+          setNavBusy(null)
+          jumpAbortRef.current = null
+          requestAnimationFrame(() => {
+            if (!stillCurrent()) return
+            const pane = graphPaneRef.current
+            const n = nodesRef.current.find((x) => x.commit.oid === oid)
+            if (!pane || !n) return
+            const { min } = spineIndexRange(nodesRef.current)
+            const local = Math.max(0, n.spineIndex - min)
+            const y = local * spineRowPitch(0)
+            pane.scrollTop = Math.max(0, y - pane.clientHeight * 0.3)
+          })
+          return
+        }
+
+        if (loc.introducingMerge) {
+          const mergeShort = loc.introducingMerge.slice(0, 7)
+          if (loc.introducingSpineIndex != null) {
+            const { min, max } = spineIndexRange(nodesRef.current)
+            const idx = loc.introducingSpineIndex
+            if (idx < min || idx > max) {
+              setNavBusy({ oid, message: `Seeking merge ${mergeShort}…` })
+              const half = Math.floor(SPINE_PAGE / 2)
+              const offset = Math.max(0, idx - half)
+              const spine = await fetchSpine(offset, SPINE_PAGE, ac.signal)
+              if (!stillCurrent()) return
+              serverHasMoreRef.current = spine.hasMore
+              applyWindow(spine.nodes, 'none')
+              syncFlags(nodesRef.current)
+            }
+          }
+          if (!stillCurrent()) return
+          // Keep spinner on the clicked node while the target feature expands.
+          setNavBusy({ oid, message: `Opening feature ${mergeShort}…` })
+          focusMergeRef.current = loc.introducingMerge
+          setSelectedOid(oid)
+          setFocusMergeOid(loc.introducingMerge)
+          jumpAbortRef.current = null
+          return
+        }
+
+        if (!stillCurrent()) return
+        setSelectedOid(oid)
+        setNavBusy(null)
+        jumpAbortRef.current = null
+      } catch (e) {
+        if (isAbortError(e) || !stillCurrent()) return
+        setNavBusy(null)
+        jumpAbortRef.current = null
+        setError(e instanceof Error ? e.message : String(e))
+      }
+    },
+    [applyWindow, clearFeatureFocus, syncFlags],
+  )
+
   const onCanvasHit = (hit: LayoutHit | null) => {
     if (!hit) {
+      cancelJump()
       setSelectedOid(null)
       return
     }
     if (hit.kind === 'spine') {
+      cancelJump()
       const node = nodes.find((n) => n.commit.oid === hit.oid)
       const expandable = node ? isExpandable(node) : false
 
@@ -245,12 +376,29 @@ export default function App() {
       setSelectedOid(hit.oid)
       return
     }
-    if (hit.kind === 'feature' || hit.kind === 'external') {
+    if (hit.kind === 'feature') {
+      cancelJump()
       setSelectedOid((prev) => (prev === hit.oid ? null : hit.oid))
+      return
+    }
+    if (hit.kind === 'external') {
+      // Integration parent is on the rail — just select if present, else jump.
+      if (hit.role === 'integration') {
+        const onRail = nodes.some((n) => n.commit.oid === hit.oid)
+        if (onRail) {
+          cancelJump()
+          setSelectedOid(hit.oid)
+          return
+        }
+      }
+      // base / synced (and missing integration): open the feature that introduced it.
+      // jumpToCommitOrigin cancels any previous jump itself.
+      void jumpToCommitOrigin(hit.oid)
     }
   }
 
   const onFocusFeature = (mergeOid: string | null) => {
+    cancelJump()
     if (mergeOid == null) {
       clearFeatureFocus()
       setSelectedOid(null)
@@ -321,12 +469,19 @@ export default function App() {
     }
   }, [applyWindow])
 
+  const navBusyRef = useRef(false)
+  const featureLoadingRef = useRef(false)
+  navBusyRef.current = Boolean(navBusy)
+  featureLoadingRef.current = featureLoading
+
   /**
    * Neighbour prefetch against *content* edges (not fake document end).
    * Does not thrash: one direction at a time, only when viewport is near a real edge.
+   * Paused while a jump/expand is in flight so window seeks are not fighting scroll.
    */
   const ensureOverscan = useCallback(() => {
     if (loadingMoreRef.current) return
+    if (navBusyRef.current || featureLoadingRef.current) return
     const pane = graphPaneRef.current
     if (!pane || nodesRef.current.length === 0) return
 
@@ -427,9 +582,20 @@ export default function App() {
           </div>
         )}
         <div className="actions">
-          {focusMergeOid && (
+          {(navBusy || featureLoading) && (
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                cancelBackgroundWork()
+              }}
+            >
+              Cancel
+            </button>
+          )}
+          {focusMergeOid && !navBusy && !featureLoading && (
             <button type="button" className="btn" onClick={() => onFocusFeature(null)}>
-              {featureLoading ? 'Cancel expand' : 'Exit feature focus'}
+              Exit feature focus
             </button>
           )}
           <button type="button" className="btn ghost" onClick={() => void load()}>
@@ -448,6 +614,8 @@ export default function App() {
               focusMergeOid={focusMergeOid}
               feature={feature}
               featureLoading={featureLoading}
+              navTargetOid={navBusy?.oid ?? null}
+              navBusyMessage={navBusy?.message ?? null}
               selectedOid={selectedOid}
               onHit={onCanvasHit}
               streamEndIndex={winMax + 1}
@@ -456,13 +624,15 @@ export default function App() {
           )}
           {!loading && nodes.length > 0 && (
             <div className="load-more-bar" aria-live="polite">
-              {featureLoading
-                ? 'Expanding feature…'
-                : loadingMore
-                  ? 'Loading…'
-                  : `Window #${winMin}–#${winMax} · ${nodes.length} commits in memory` +
-                    (hasMoreOlder ? ' · older available below' : '') +
-                    (hasMoreNewer ? ' · newer available above' : '')}
+              {navBusy
+                ? navBusy.message
+                : featureLoading
+                  ? 'Expanding feature…'
+                  : loadingMore
+                    ? 'Loading…'
+                    : `Window #${winMin}–#${winMax} · ${nodes.length} commits in memory` +
+                      (hasMoreOlder ? ' · older available below' : '') +
+                      (hasMoreNewer ? ' · newer available above' : '')}
             </div>
           )}
         </section>
@@ -530,7 +700,20 @@ export default function App() {
             </div>
           )}
 
-          {focusMergeOid && featureLoading && (
+          {navBusy && (
+            <div className="feature-summary feature-loading" aria-live="polite">
+              <h2>Navigating</h2>
+              <div className="feature-loading-row">
+                <span className="spinner" aria-hidden />
+                <p>{navBusy.message}</p>
+              </div>
+              <p className="muted small">
+                Spinner is on the clicked node. Esc or Cancel aborts and ignores any late response.
+              </p>
+            </div>
+          )}
+
+          {focusMergeOid && featureLoading && !navBusy && (
             <div className="feature-summary feature-loading" aria-live="polite">
               <h2>Feature bundle</h2>
               <div className="feature-loading-row">
@@ -540,7 +723,7 @@ export default function App() {
                 </p>
               </div>
               <p className="muted small">
-                Click the merge again (or Esc) to cancel — the request is aborted and discarded.
+                Click the merge again (or Esc / Cancel) to abort — late results are discarded.
               </p>
             </div>
           )}
@@ -553,10 +736,11 @@ export default function App() {
                 {feature.tips.length} tip(s)
               </p>
               <p className="muted small">
-                Blue = feature commits. Context:{' '}
+                Blue = feature commits. Context nodes:{' '}
                 <span className="role-base">branch base</span>,{' '}
                 <span className="role-sync">synced in</span>,{' '}
-                <span className="role-integration">on main</span>.
+                <span className="role-integration">on main</span>. Click a base/synced node to jump
+                into the feature that introduced that commit.
               </p>
               {feature.truncated && (
                 <p className="banner warn">

@@ -11,6 +11,7 @@ import {
   ROW,
   SUBJECT_MAX_W,
   SUBJECT_X,
+  SYNC_X,
   easeInOutCubic,
   hitTest,
   layoutSpine,
@@ -67,6 +68,9 @@ type Props = {
   feature: FeatureSubgraph | null
   /** Expand request in flight — dim spine and pulse the merge before data arrives. */
   featureLoading?: boolean
+  /** Jump-to-origin: spin next to this node while locate/seek runs. */
+  navTargetOid?: string | null
+  navBusyMessage?: string | null
   selectedOid: string | null
   onHit: (hit: LayoutHit | null) => void
   /** Exclusive end of the loaded stream (max spineIndex+1 seen). */
@@ -110,6 +114,8 @@ export function SpineCanvas({
   focusMergeOid,
   feature,
   featureLoading = false,
+  navTargetOid = null,
+  navBusyMessage = null,
   selectedOid,
   onHit,
   streamEndIndex = 0,
@@ -129,6 +135,10 @@ export function SpineCanvas({
   const selectedRef = useRef(selectedOid)
   const propFocusRef = useRef(focusMergeOid)
   const featureLoadingRef = useRef(featureLoading)
+  const navTargetRef = useRef(navTargetOid)
+  const navMsgRef = useRef(navBusyMessage)
+  /** Last known canvas position of the nav target (survives feature collapse mid-jump). */
+  const navPinRef = useRef<{ oid: string; x: number; y: number } | null>(null)
   const streamEndRef = useRef(streamEndIndex)
   const hasMoreOlderRef = useRef(hasMoreOlder)
   const loadSpinRafRef = useRef(0)
@@ -136,8 +146,11 @@ export function SpineCanvas({
   selectedRef.current = selectedOid
   propFocusRef.current = focusMergeOid
   featureLoadingRef.current = featureLoading
+  navTargetRef.current = navTargetOid
+  navMsgRef.current = navBusyMessage
   streamEndRef.current = streamEndIndex
   hasMoreOlderRef.current = hasMoreOlder
+  if (!navTargetOid) navPinRef.current = null
 
   const rafRef = useRef(0)
   const animRef = useRef<{
@@ -230,6 +243,7 @@ export function SpineCanvas({
         return null
       }
 
+
       // Landing / boundary: H–V–H through a dedicated gutter (never on the spine rail).
       // Horizontal legs sit at each endpoint's Y so you can see which commit is which.
       type ElbowDraw = {
@@ -260,15 +274,33 @@ export function SpineCanvas({
         const to = posOf(e.to)
         if (!from || !to) continue
 
-        const isElbow = e.kind === 'landing' || e.kind === 'boundary'
+        const role = e.role ?? layout.externalRoles.get(e.to)
+        const sameColumn =
+          Math.abs(from.x - to.x) < 2 && Math.abs(from.x - LANE_X) < 2
+        // Landing + synced-in use curved elbows; base (same column) is a plain vertical.
+        const isElbow =
+          e.kind === 'landing' ||
+          (e.kind === 'boundary' && role === 'synced') ||
+          (e.kind === 'boundary' && role === 'integration' && !sameColumn) ||
+          (e.kind === 'boundary' && role !== 'base' && !sameColumn)
         const channel = isElbow
           ? (channelOf.get(`${e.from}->${e.to}:${e.kind}`) ?? 0)
           : 0
 
         ctx.beginPath()
-        if (e.kind === 'boundary') {
+        if (e.kind === 'boundary' && role === 'base') {
+          // Continuation of the feature list — dashed orange (context, not in-bundle).
           ctx.setLineDash([4, 3])
-          ctx.strokeStyle = roleEdgeColor(e.role ?? layout.externalRoles.get(e.to))
+          ctx.strokeStyle = COLORS.roleBaseEdge
+          ctx.lineWidth = 1.75
+        } else if (e.kind === 'boundary' && role === 'synced') {
+          // Landing-style elbow, green + dashed so it reads as external context.
+          ctx.setLineDash([4, 3])
+          ctx.strokeStyle = COLORS.roleSyncEdge
+          ctx.lineWidth = 2
+        } else if (e.kind === 'boundary') {
+          ctx.setLineDash([4, 3])
+          ctx.strokeStyle = roleEdgeColor(role)
           ctx.lineWidth = 1.5
         } else if (e.kind === 'landing') {
           ctx.setLineDash([])
@@ -278,6 +310,7 @@ export function SpineCanvas({
           ctx.setLineDash([])
           ctx.strokeStyle = COLORS.featureEdge
           ctx.lineWidth = 1.75
+          ctx.globalAlpha = featureAlpha
         }
 
         if (isElbow) {
@@ -297,21 +330,40 @@ export function SpineCanvas({
         }
         ctx.stroke()
         ctx.setLineDash([])
+        ctx.globalAlpha = featureAlpha
       }
 
-      // Soft vertical guide through the feature column.
-      const foids = dFeature.commits.map((c) => c.oid)
-      for (let i = 0; i < foids.length - 1; i++) {
-        const y1 = layout.featureYs.get(foids[i])
-        const y2 = layout.featureYs.get(foids[i + 1])
-        if (y1 == null || y2 == null) continue
+      // Soft vertical guide through the feature column (and branch-base below it).
+      const lanePoints: number[] = []
+      for (const c of dFeature.commits) {
+        const fy = layout.featureYs.get(c.oid)
+        if (fy != null) lanePoints.push(fy)
+      }
+      for (const ext of dFeature.externals ?? []) {
+        if (ext.role !== 'base') continue
+        const ey = layout.externalYs.get(ext.commit.oid)
+        const ex = layout.externalXs.get(ext.commit.oid)
+        if (ey != null && ex != null && Math.abs(ex - LANE_X) < 2) lanePoints.push(ey)
+      }
+      lanePoints.sort((a, b) => a - b)
+      for (let i = 0; i < lanePoints.length - 1; i++) {
         ctx.beginPath()
-        ctx.strokeStyle = COLORS.featureEdge
+        // Base segment uses base edge color; feature segment stays blue.
+        const yMid = (lanePoints[i] + lanePoints[i + 1]) / 2
+        const pastFeatures =
+          dFeature.commits.length === 0 ||
+          yMid >
+            Math.max(
+              ...dFeature.commits.map((c) => layout.featureYs.get(c.oid) ?? 0),
+            )
+        ctx.strokeStyle = pastFeatures ? COLORS.roleBaseEdge : COLORS.featureEdge
         ctx.lineWidth = 2
         ctx.globalAlpha = featureAlpha * 0.85
-        ctx.moveTo(LANE_X, y1)
-        ctx.lineTo(LANE_X, y2)
+        if (pastFeatures) ctx.setLineDash([4, 3])
+        ctx.moveTo(LANE_X, lanePoints[i])
+        ctx.lineTo(LANE_X, lanePoints[i + 1])
         ctx.stroke()
+        ctx.setLineDash([])
         ctx.globalAlpha = featureAlpha
       }
 
@@ -327,6 +379,22 @@ export function SpineCanvas({
           ctx.lineWidth = 2
           ctx.stroke()
         }
+        if (c.refs?.length) {
+          const chips = layoutRefChips(
+            ctx,
+            c.oid,
+            c.refs,
+            fy,
+            LANE_X - 10,
+            RAIL_X + MERGE_R + 8,
+          )
+          if (chips) {
+            refRows.push(chips)
+            for (const chip of chips.chips) {
+              drawRefChip(ctx, chip, false)
+            }
+          }
+        }
         ctx.fillStyle = COLORS.text
         ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace'
         const oidText = c.shortOid
@@ -334,7 +402,6 @@ export function SpineCanvas({
         const oidW = ctx.measureText(oidText + '  ').width
         ctx.fillStyle = COLORS.textDim
         ctx.font = '12px system-ui, sans-serif'
-        // Keep labels short so the right-side elbow gutter stays clear.
         ctx.fillText(
           fitText(ctx, c.subject, FEATURE_LABEL_W - oidW),
           LANE_X + 14 + oidW,
@@ -342,7 +409,8 @@ export function SpineCanvas({
         )
       }
 
-      // Off-spine external context (branch base, sync merges). On-spine roles drawn later.
+
+      // Off-spine external context (branch base on the feature column, synced to the right).
       for (const ext of dFeature.externals ?? []) {
         const oid = ext.commit.oid
         const ey = layout.externalYs.get(oid)
@@ -353,14 +421,15 @@ export function SpineCanvas({
         const badge = roleBadge(ext.role)
         ctx.font = '10px system-ui, sans-serif'
         ctx.fillStyle = roleColor(ext.role)
-        ctx.fillText(badge, ex + 12, ey - 8)
+        ctx.fillText(badge, ex + 12, ey - 10)
         ctx.fillStyle = COLORS.text
         ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace'
         ctx.fillText(ext.commit.shortOid, ex + 12, ey + 4)
         const oidW = ctx.measureText(ext.commit.shortOid + ' ').width
         ctx.fillStyle = COLORS.textDim
         ctx.font = '11px system-ui, sans-serif'
-        ctx.fillText(fitText(ctx, ext.commit.subject, 160), ex + 12 + oidW, ey + 4)
+        const labelW = Math.abs(ex - LANE_X) < 2 ? FEATURE_LABEL_W : 150
+        ctx.fillText(fitText(ctx, ext.commit.subject, labelW - oidW), ex + 12 + oidW, ey + 4)
       }
 
       if (openT > 0.7) {
@@ -408,7 +477,8 @@ export function SpineCanvas({
         ctx.globalAlpha = 1
       }
 
-      if (n.commit.refs?.length && (compressT < 0.4 || isAnchor || isFocus || isPendingFocus)) {
+      // Always expose branch/tag chips when git has decorations for this commit.
+      if (n.commit.refs?.length) {
         const chips = layoutRefChips(
           ctx,
           n.commit.oid,
@@ -420,7 +490,8 @@ export function SpineCanvas({
         if (chips) {
           refRows.push(chips)
           for (const chip of chips.chips) {
-            drawRefChip(ctx, chip, isDim && !isAnchor)
+            // Keep chips readable even when the spine is dimmed for feature focus.
+            drawRefChip(ctx, chip, isDim && !isFocus && !isAnchor)
           }
         }
       }
@@ -496,6 +567,56 @@ export function SpineCanvas({
       }
     }
 
+    // Jump-to-origin: same visual language as expand-loading (dashed stub + spinner + label).
+    // Pin last known position so the indicator survives when the feature collapses mid-jump.
+    const navOid = navTargetRef.current
+    if (navOid) {
+      let pos: { x: number; y: number } | null = null
+      const ey = layout.externalYs.get(navOid)
+      const ex = layout.externalXs.get(navOid)
+      if (ey != null && ex != null) pos = { x: ex, y: ey }
+      else {
+        const fy = layout.featureYs.get(navOid)
+        if (fy != null) pos = { x: LANE_X, y: fy }
+        else {
+          const sy = layout.yOf.get(navOid)
+          if (sy != null) pos = { x: RAIL_X, y: sy }
+        }
+      }
+      if (pos) {
+        navPinRef.current = { oid: navOid, x: pos.x, y: pos.y }
+      } else if (navPinRef.current?.oid === navOid) {
+        pos = { x: navPinRef.current.x, y: navPinRef.current.y }
+      }
+      if (pos) {
+        // Same geometry as expand: slot one row below the node, spinner on that column.
+        const loadY = pos.y + ROW * 0.9
+        const loadX = pos.x
+        ctx.beginPath()
+        ctx.strokeStyle = 'rgba(126, 200, 227, 0.35)'
+        ctx.lineWidth = 1.5
+        ctx.setLineDash([3, 3])
+        // Soft stub from the clicked node into the loading slot.
+        if (Math.abs(pos.x - RAIL_X) < 2) {
+          // Spine node → out to lane then down (matches expand-from-merge).
+          ctx.moveTo(RAIL_X + MERGE_R + 2, pos.y)
+          ctx.lineTo(LANE_X, pos.y)
+          ctx.lineTo(LANE_X, loadY - 10)
+        } else {
+          ctx.moveTo(pos.x, pos.y + NODE_R + 2)
+          ctx.lineTo(loadX, loadY - 10)
+        }
+        ctx.stroke()
+        ctx.setLineDash([])
+
+        const spinX = Math.abs(pos.x - RAIL_X) < 2 ? LANE_X : loadX
+        drawExpandSpinner(ctx, spinX, loadY, performance.now())
+        ctx.fillStyle = COLORS.feature
+        ctx.font = '12px system-ui, sans-serif'
+        ctx.fillText(expandStyleNavMessage(navMsgRef.current), spinX + 16, loadY + 4)
+      }
+    }
+
     // On-spine external roles (e.g. integration parent of the expanded merge).
     if (dFocus && dFeature && openT > 0.2) {
       ctx.save()
@@ -519,11 +640,13 @@ export function SpineCanvas({
 
     ctx.fillStyle = COLORS.textDim
     ctx.font = '11px system-ui, sans-serif'
-    const hint = pendingOid
-      ? 'Loading feature… — click the merge again (or Esc) to cancel'
-      : openT > 0.5
-        ? 'Feature expanded — click the same merge again (or Esc) to collapse · hover for messages'
-        : 'Main spine — click a merge commit to expand its feature history · hover for messages'
+    const hint = navTargetRef.current
+      ? 'Locating commit… — Esc or Cancel to stop'
+      : pendingOid
+        ? 'Loading feature… — click the merge again (or Esc) to cancel'
+        : openT > 0.5
+          ? 'Feature expanded — click the same merge again (or Esc) to collapse · hover for messages'
+          : 'Main spine — click a merge commit to expand its feature history · hover for messages'
     ctx.fillText(hint, 16, 20)
   }, [])
 
@@ -623,9 +746,10 @@ export function SpineCanvas({
     }
   }, [focusMergeOid, feature, featureLoading, animateTo, paint])
 
-  // Spin the loading indicator while expand is in flight.
+  // Spin the loading indicator while expand or jump-to-origin is in flight.
+  const spinBusy = featureLoading || Boolean(navTargetOid)
   useEffect(() => {
-    if (!featureLoading) {
+    if (!spinBusy) {
       if (loadSpinRafRef.current) {
         cancelAnimationFrame(loadSpinRafRef.current)
         loadSpinRafRef.current = 0
@@ -643,7 +767,7 @@ export function SpineCanvas({
         loadSpinRafRef.current = 0
       }
     }
-  }, [featureLoading, paint])
+  }, [spinBusy, paint])
 
   useEffect(() => {
     paint()
@@ -657,7 +781,7 @@ export function SpineCanvas({
         loadSpinRafRef.current = 0
       }
     }
-  }, [paint, stopAnim, nodes, selectedOid, streamEndIndex, hasMoreOlder, featureLoading])
+  }, [paint, stopAnim, nodes, selectedOid, streamEndIndex, hasMoreOlder, featureLoading, navTargetOid, navBusyMessage])
 
   const localPoint = (e: React.MouseEvent) => {
     const canvas = canvasRef.current
@@ -713,7 +837,7 @@ export function SpineCanvas({
     if (hit?.kind === 'feature' || hit?.kind === 'external') {
       const c =
         displayFeatureRef.current?.commits.find((x) => x.oid === hit.oid) ??
-        displayFeatureRef.current?.externals?.find((x) => x.commit.oid === hit.oid)
+displayFeatureRef.current?.externals?.find((x) => x.commit.oid === hit.oid)
           ?.commit
       if (c) {
         setTooltip({
@@ -778,7 +902,7 @@ export function SpineCanvas({
   )
 }
 
-/** Arc spinner drawn at the feature lane while expand is in flight. */
+/** Arc spinner used by expand-loading and jump-to-origin. */
 function drawExpandSpinner(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -799,6 +923,16 @@ function drawExpandSpinner(
   ctx.arc(x, y, r, 0, Math.PI * 2)
   ctx.stroke()
   ctx.restore()
+}
+
+/** Label next to the expand-style spinner (matches “Loading feature…” tone). */
+function expandStyleNavMessage(msg: string | null | undefined): string {
+  if (!msg) return 'Loading…'
+  if (msg.startsWith('Opening')) return 'Loading feature…'
+  if (msg.startsWith('Seeking')) return 'Loading feature…'
+  if (msg.startsWith('Loading history')) return 'Loading…'
+  if (msg.startsWith('Locating')) return 'Loading…'
+  return 'Loading…'
 }
 
 function drawRefChip(
@@ -870,22 +1004,27 @@ function strokeGutterElbow(
   const minX = Math.min(x0, x1)
   const maxX = Math.max(x0, x1)
   const touchesSpine = minX <= RAIL_X + 12
-  const touchesExternal = maxX >= EXTERNAL_X - 24
+  // Synced-in column (or any point right of the feature lane).
+  const touchesRightLane = maxX >= SYNC_X - 12 || maxX >= EXTERNAL_X - 24
 
   const minR = 8
   const wantR = Math.max(r, minR)
 
-  // --- Right side: feature ↔ external / branch base ---
-  if (touchesExternal && !touchesSpine) {
-    const featureIs0 = Math.abs(x0 - LANE_X) <= Math.abs(x1 - LANE_X)
-    const fx = featureIs0 ? x0 : x1
-    const fy = featureIs0 ? y0 : y1
-    const ex = featureIs0 ? x1 : x0
-    const ey = featureIs0 ? y1 : y0
+  // --- Right side: feature → synced-in (curved elbow, like a landing) ---
+  if (touchesRightLane && !touchesSpine) {
+    // Prefer treating the leftmost endpoint as the feature/merge side.
+    const leftIs0 = x0 <= x1
+    const fx = leftIs0 ? x0 : x1
+    const fy = leftIs0 ? y0 : y1
+    const ex = leftIs0 ? x1 : x0
+    const ey = leftIs0 ? y1 : y0
 
+    // Vertical run in the gutter between feature lane and synced column.
+    const gLeft = LANE_X + 14
+    const gRight = Math.max(SYNC_X - 14, gLeft + 16)
     const slots = Math.max(channelCount, 1)
-    const inset = 16 + (slots > 1 ? (channel / slots) * 18 : 0)
-    const vx = ex - inset
+    const tt = slots === 1 ? 0.45 : (channel + 1) / (slots + 1)
+    const vx = gLeft + (gRight - gLeft) * tt
 
     let rr = Math.min(
       wantR,
@@ -893,11 +1032,15 @@ function strokeGutterElbow(
       Math.abs(ey - fy) / 2 - 1,
       Math.abs(ex - vx) - 2,
     )
-    if (!Number.isFinite(rr) || rr < minR) rr = Math.min(minR, Math.abs(ey - fy) / 2)
+    if (!Number.isFinite(rr) || rr < minR) {
+      rr = Math.min(minR, Math.abs(ey - fy) / 2, Math.abs(ex - fx) / 2)
+    }
+    rr = Math.max(4, rr)
 
+    // Same H–V–H language as spine landings: out, down, in.
     ctx.moveTo(fx, fy)
-    ctx.arcTo(vx, fy, vx, ey, Math.max(3, rr))
-    ctx.arcTo(vx, ey, ex, ey, Math.max(3, rr))
+    ctx.arcTo(vx, fy, vx, ey, rr)
+    ctx.arcTo(vx, ey, ex, ey, rr)
     ctx.lineTo(ex, ey)
     return
   }
@@ -995,15 +1138,18 @@ function drawExternalNode(
     ctx.stroke()
     ctx.setLineDash([])
   } else if (role === 'synced') {
-    // Square — “brought in from outside”
-    const s = NODE_R + 1
+    // Circle — reads like a normal commit that landed from the side (green).
+    ctx.beginPath()
     ctx.fillStyle = color
+    ctx.arc(x, y, NODE_R - 1, 0, Math.PI * 2)
+    ctx.fill()
     ctx.strokeStyle = color
     ctx.lineWidth = 1.5
-    ctx.fillRect(x - s, y - s, s * 2, s * 2)
-    ctx.strokeRect(x - s, y - s, s * 2, s * 2)
+    ctx.beginPath()
+    ctx.arc(x, y, NODE_R + 2, 0, Math.PI * 2)
+    ctx.stroke()
   } else {
-    // Diamond — branch base / starting point
+    // Diamond — branch base / starting point (on the feature column).
     const s = NODE_R + 2
     ctx.beginPath()
     ctx.moveTo(x, y - s)
@@ -1027,8 +1173,8 @@ function drawExternalNode(
 function drawFeatureLegend(ctx: CanvasRenderingContext2D, canvasW: number) {
   const items: { label: string; color: string; shape: 'circle' | 'diamond' | 'square' | 'halo' }[] = [
     { label: 'feature', color: COLORS.feature, shape: 'circle' },
+    { label: 'synced in', color: COLORS.roleSync, shape: 'circle' },
     { label: 'branch base', color: COLORS.roleBase, shape: 'diamond' },
-    { label: 'synced in', color: COLORS.roleSync, shape: 'square' },
     { label: 'on main', color: COLORS.roleIntegration, shape: 'halo' },
   ]
   const x0 = Math.max(EXTERNAL_X, canvasW - 320)

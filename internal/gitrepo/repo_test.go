@@ -34,6 +34,43 @@ func TestSpineAndExpandAgainstFixture(t *testing.T) {
 	}
 	_ = hasMore
 
+	// Tip of the integration branch must expose its branch name (and HEAD if checked out).
+	if len(nodes[0].Commit.Refs) == 0 {
+		t.Fatalf("expected tip %s to have refs (branch/tag decorations), got none", nodes[0].Commit.ShortOID)
+	}
+	foundMain := false
+	for _, ref := range nodes[0].Commit.Refs {
+		if ref == "main" || ref == "master" {
+			foundMain = true
+			break
+		}
+	}
+	if !foundMain {
+		t.Fatalf("expected main/master on tip refs, got %v", nodes[0].Commit.Refs)
+	}
+
+	// Every ref tip that lies on this first-parent page should be decorated.
+	idx, err := repo.refIndex(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	onPage := map[string][]string{}
+	for _, n := range nodes {
+		onPage[n.Commit.OID] = n.Commit.Refs
+	}
+	for oid, names := range idx {
+		if refs, ok := onPage[oid]; ok {
+			for _, want := range names {
+				if want == "HEAD" {
+					continue
+				}
+				if !containsStr(refs, want) {
+					t.Errorf("commit %s missing ref %q; have %v", shortTest(oid), want, refs)
+				}
+			}
+		}
+	}
+
 	var merges int
 	for _, n := range nodes {
 		if n.Capsule != nil {
@@ -98,6 +135,22 @@ func parseInt(s string, n *int) (int, error) {
 	}
 	*n = v
 	return v, nil
+}
+
+func containsStr(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+func shortTest(oid string) string {
+	if len(oid) >= 7 {
+		return oid[:7]
+	}
+	return oid
 }
 
 func findRepoRoot(t *testing.T) string {

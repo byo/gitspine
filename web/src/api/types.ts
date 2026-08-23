@@ -63,3 +63,12 @@ export type FeatureSubgraph = {
   /** True when expand hit the server commit cap; “base” may be a cut point. */
   truncated?: boolean
 }
+
+/** Where a commit sits relative to the integration spine / which feature landed it. */
+export type CommitOrigin = {
+  oid: string
+  onSpine: boolean
+  spineIndex?: number
+  introducingMerge?: string
+  introducingSpineIndex?: number
+}

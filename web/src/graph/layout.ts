@@ -20,10 +20,16 @@ export const SUBJECT_MAX_W = 480
 export const LANE_GUTTER = 52
 export const LANE_X = RAIL_X + LANE_GUTTER
 /**
- * Context column for commits outside the feature (base / sync).
- * Keep far enough right that right-side L elbows clear feature labels.
+ * Synced-in commits (merged from another line into the feature).
+ * Slightly right of the feature lane — same visual role as a landing tip
+ * off the spine, with a curved green elbow back to the merge.
  */
-export const EXTERNAL_X = LANE_X + 210
+export const SYNC_X = LANE_X + 56
+/**
+ * Fallback column for any other off-spine context (rarely used now that
+ * base sits on the feature lane and synced uses SYNC_X).
+ */
+export const EXTERNAL_X = SYNC_X + 160
 /** Feature subject text is drawn up to roughly LANE_X + this width. */
 export const FEATURE_LABEL_W = 150
 export const TOP_PAD = 48
@@ -128,9 +134,23 @@ export function layoutSpine(
   const loadingPlaceholder =
     Boolean(featureLoading && focusMergeOid && !feature)
 
+  // Feature rows + one reserved row under each merge that has a synced-in
+  // child + off-rail bases under the list.
+  const syncSourceOids = new Set<string>()
+  if (feature) {
+    for (const e of feature.edges) {
+      if (e.kind === 'boundary' && e.role === 'synced') syncSourceOids.add(e.from)
+    }
+  }
+  const offRailBaseCount =
+    feature?.externals?.filter((e) => e.role === 'base').length ?? 0
+  const syncRowCount = syncSourceOids.size
   const fullGap =
     focusMergeOid && feature && feature.commits.length > 0
-      ? feature.commits.length * ROW + 12
+      ? feature.commits.length * ROW +
+        syncRowCount * ROW +
+        offRailBaseCount * ROW +
+        16
       : loadingPlaceholder
         ? FEATURE_LOADING_GAP
         : 0
@@ -153,10 +173,110 @@ export function layoutSpine(
     if (gapAfterLocal === i && focusMergeOid && gapPx > 0) {
       if (feature) {
         const mergeY = yOf.get(focusMergeOid)!
-        let restY = y
+        // Layout in *full-open* coordinates first, then scale once by t.
+        const featureYFull = new Map<string, number>()
+        // sourceOid → full-open Y of the dedicated sync row under that merge
+        const syncRowYFull = new Map<string, number>()
+        let restY = y // first feature row in full-open space (= next spine slot)
         for (const c of feature.commits) {
-          featureYs.set(c.oid, mergeY + (restY - mergeY) * t)
+          featureYFull.set(c.oid, restY)
           restY += ROW
+          // Reserve one full extra row under merges that pull in a synced parent.
+          if (syncSourceOids.has(c.oid)) {
+            syncRowYFull.set(c.oid, restY)
+            restY += ROW
+          }
+        }
+
+        // Which feature commit links to each synced external (prefer top-most).
+        const linkFrom = new Map<string, string>() // external oid → feature oid
+        for (const e of feature.edges) {
+          if (e.kind !== 'boundary' || e.role !== 'synced') continue
+          if (!featureYFull.has(e.from)) continue
+          const prev = linkFrom.get(e.to)
+          if (prev == null) {
+            linkFrom.set(e.to, e.from)
+          } else {
+            const prevY = featureYFull.get(prev) ?? Infinity
+            const curY = featureYFull.get(e.from) ?? Infinity
+            if (curY < prevY) linkFrom.set(e.to, e.from)
+          }
+        }
+
+        let featureBottom = mergeY
+        for (const fy of featureYFull.values()) {
+          if (fy > featureBottom) featureBottom = fy
+        }
+        for (const sy of syncRowYFull.values()) {
+          if (sy > featureBottom) featureBottom = sy
+        }
+
+        const extYFull = new Map<string, number>()
+        const extX = new Map<string, number>()
+
+        // Pin every external that already sits on the loaded spine rail.
+        for (const ext of feature.externals ?? []) {
+          const oid = ext.commit.oid
+          externalRoles.set(oid, ext.role)
+          if (yOf.has(oid)) {
+            extX.set(oid, RAIL_X)
+            extYFull.set(oid, yOf.get(oid)!) // spine Y is already absolute
+          }
+        }
+
+        // Synced-in: one dedicated row under its source merge, at SYNC_X.
+        const syncSlotAt = new Map<string, number>() // source oid → slot index
+        for (const ext of feature.externals ?? []) {
+          if (ext.role !== 'synced') continue
+          const oid = ext.commit.oid
+          if (yOf.has(oid)) continue
+          const sourceOid = linkFrom.get(oid)
+          const rowY =
+            (sourceOid ? syncRowYFull.get(sourceOid) : undefined) ??
+            featureBottom + ROW
+          const slot = sourceOid ? (syncSlotAt.get(sourceOid) ?? 0) : 0
+          if (sourceOid) syncSlotAt.set(sourceOid, slot + 1)
+          // Single sync per merge uses the row center; rare multi-parent staggers.
+          const targetY = rowY + slot * 12
+          extX.set(oid, SYNC_X)
+          extYFull.set(oid, targetY)
+        }
+
+        // True off-rail branch base: continue the feature column under the list.
+        let baseY = featureBottom + ROW
+        for (const ext of feature.externals ?? []) {
+          if (ext.role !== 'base') continue
+          const oid = ext.commit.oid
+          if (yOf.has(oid) || extYFull.has(oid)) continue
+          extX.set(oid, LANE_X)
+          extYFull.set(oid, baseY)
+          baseY += ROW
+        }
+
+        // Leftover non-integration roles not yet placed.
+        for (const ext of feature.externals ?? []) {
+          const oid = ext.commit.oid
+          if (ext.role === 'integration' || yOf.has(oid) || extYFull.has(oid)) {
+            continue
+          }
+          extX.set(oid, EXTERNAL_X)
+          extYFull.set(oid, baseY)
+          baseY += ROW
+        }
+
+        // Apply openT once: feature + off-rail externals expand from the landing merge.
+        for (const [oid, fullY] of featureYFull) {
+          featureYs.set(oid, mergeY + (fullY - mergeY) * t)
+        }
+        for (const [oid, fullY] of extYFull) {
+          const x = extX.get(oid) ?? EXTERNAL_X
+          externalXs.set(oid, x)
+          if (x === RAIL_X) {
+            // Spine-pinned: stay on the rail (no expand animation from merge).
+            externalYs.set(oid, fullY)
+          } else {
+            externalYs.set(oid, mergeY + (fullY - mergeY) * t)
+          }
         }
       }
       y += gapPx
@@ -165,65 +285,6 @@ export function layoutSpine(
 
   const tailPad = hasMoreOlder ? SPINE_STREAM_TAIL_ROWS * row : row
   const totalHeight = y + tailPad + TOP_PAD
-
-  if (focusMergeOid && feature && feature.externals?.length && t > 0) {
-    const linkYs = new Map<string, number[]>()
-    for (const e of feature.edges) {
-      if (e.kind !== 'boundary') continue
-      const fy = featureYs.get(e.from)
-      if (fy == null) continue
-      const arr = linkYs.get(e.to) ?? []
-      arr.push(fy)
-      linkYs.set(e.to, arr)
-    }
-    if (feature.firstParent) {
-      const my = yOf.get(focusMergeOid)
-      if (my != null) {
-        const arr = linkYs.get(feature.firstParent) ?? []
-        arr.push(my)
-        linkYs.set(feature.firstParent, arr)
-      }
-    }
-
-    let featureBottom = yOf.get(focusMergeOid) ?? TOP_PAD
-    for (const fy of featureYs.values()) {
-      if (fy > featureBottom) featureBottom = fy
-    }
-
-    const usedOffSpine: number[] = []
-    for (const ext of feature.externals) {
-      const oid = ext.commit.oid
-      externalRoles.set(oid, ext.role)
-      const onSpine = yOf.has(oid)
-      if (onSpine) {
-        externalXs.set(oid, RAIL_X)
-        externalYs.set(oid, yOf.get(oid)!)
-        continue
-      }
-      externalXs.set(oid, EXTERNAL_X)
-      const links = linkYs.get(oid)
-
-      let targetY: number
-      if (ext.role === 'base') {
-        const linkMax =
-          links && links.length ? Math.max(...links) : featureBottom
-        targetY = Math.max(linkMax, featureBottom) + ROW
-      } else if (links && links.length) {
-        targetY = links.reduce((a, b) => a + b, 0) / links.length
-      } else {
-        targetY = featureBottom + ROW
-      }
-
-      for (let guard = 0; guard < 8; guard++) {
-        const clash = usedOffSpine.some((uy) => Math.abs(uy - targetY) < ROW - 4)
-        if (!clash) break
-        targetY += ROW
-      }
-      usedOffSpine.push(targetY)
-      const mergeY = yOf.get(focusMergeOid) ?? targetY
-      externalYs.set(oid, mergeY + (targetY - mergeY) * t)
-    }
-  }
 
   return {
     nodes: sorted,
@@ -299,6 +360,7 @@ export function hitTest(
         return { kind: 'feature', oid, mergeOid: focusMergeOid }
       }
     }
+
   }
 
   // 3) Spine label column.

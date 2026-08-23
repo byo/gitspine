@@ -1,4 +1,4 @@
-import type { FeatureSubgraph, RepoMeta, SpineResponse, Commit } from './types'
+import type { CommitOrigin, FeatureSubgraph, RepoMeta, SpineResponse, Commit } from './types'
 
 async function getJSON<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init)
@@ -40,6 +40,17 @@ export function expandFeature(
 
 export function fetchCommit(oid: string, signal?: AbortSignal): Promise<Commit> {
   return getJSON(`/api/v1/commits/${encodeURIComponent(oid)}`, signal ? { signal } : undefined)
+}
+
+/** Locate commit on the spine or the feature merge that introduced it. */
+export function fetchCommitOrigin(
+  oid: string,
+  signal?: AbortSignal,
+): Promise<CommitOrigin> {
+  return getJSON(
+    `/api/v1/commits/${encodeURIComponent(oid)}/origin`,
+    signal ? { signal } : undefined,
+  )
 }
 
 /** True for fetch aborts (collapse mid-expand, unmount, etc.). */

@@ -66,7 +66,20 @@ git checkout -q main
 AUTHOR_DATE="2026-01-15T10:00:00Z" commit "chore: version bump" VERSION
 AUTHOR_DATE="2026-01-16T12:00:00Z" git merge --no-ff feat/polish -m "Merge branch 'feat/polish'"
 
-AUTHOR_DATE="2026-01-17T10:00:00Z" commit "release: note 0.1.0" CHANGELOG.md
+# --- nested topic: feat/search merged into feat/ui (not via main spine) ---
+git checkout -q -b feat/search
+AUTHOR_DATE="2026-01-17T11:00:00Z" commit "feat(search): index documents" search.go
+AUTHOR_DATE="2026-01-18T11:00:00Z" commit "feat(search): query parser" search.go
+git checkout -q main
+git checkout -q -b feat/ui
+AUTHOR_DATE="2026-01-19T11:00:00Z" commit "feat(ui): shell layout" ui.go
+# absorb another feature without landing it on main first
+AUTHOR_DATE="2026-01-20T11:00:00Z" git merge --no-ff feat/search -m "Merge branch 'feat/search' into feat/ui"
+AUTHOR_DATE="2026-01-21T11:00:00Z" commit "feat(ui): wire search box" ui.go
+git checkout -q main
+AUTHOR_DATE="2026-01-22T12:00:00Z" git merge --no-ff feat/ui -m "Merge branch 'feat/ui'"
+
+AUTHOR_DATE="2026-01-23T10:00:00Z" commit "release: note 0.1.0" CHANGELOG.md
 git tag -a v0.1.0 -m "v0.1.0"
 
 echo "Fixture repo ready: $DEST"

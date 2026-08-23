@@ -31,6 +31,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/spine", s.handleSpine)
 	mux.HandleFunc("GET /api/v1/features/{oid}/expand", s.handleExpand)
 	mux.HandleFunc("GET /api/v1/commits/{oid}", s.handleCommit)
+	mux.HandleFunc("GET /api/v1/commits/{oid}/origin", s.handleCommitOrigin)
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -136,6 +137,19 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, c)
 }
 
+func (s *Server) handleCommitOrigin(w http.ResponseWriter, r *http.Request) {
+	oid := r.PathValue("oid")
+	if oid == "" {
+		writeErr(w, http.StatusBadRequest, "missing_oid", "commit oid required")
+		return
+	}
+	loc, err := s.Repo.LocateCommit(r.Context(), oid, s.Ref)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "locate_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, loc)
+}
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")

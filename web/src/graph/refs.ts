@@ -5,9 +5,9 @@ export const REF_CHIP_PAD_X = 6
 export const REF_CHIP_GAP = 4
 export const REF_CHIP_RADIUS = 5
 /** Max chips drawn (last may be a "+N" overflow chip). */
-export const REF_MAX_VISIBLE = 2
+export const REF_MAX_VISIBLE = 3
 /** Soft cap on a single chip's label width. */
-export const REF_MAX_CHIP_W = 88
+export const REF_MAX_CHIP_W = 100
 /** Space reserved left of the rail for chips (right edge of chip row). */
 export const REF_GUTTER_PAD = 12
 
