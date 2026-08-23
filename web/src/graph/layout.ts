@@ -32,7 +32,11 @@ export const SYNC_X = LANE_X + 56
 export const EXTERNAL_X = SYNC_X + 160
 /** Feature subject text is drawn up to roughly LANE_X + this width. */
 export const FEATURE_LABEL_W = 150
-export const TOP_PAD = 48
+/**
+ * Space above the first spine node for the content-top hint band.
+ * Keep this larger than the hint chrome so subjects never sit under the text.
+ */
+export const TOP_PAD = 64
 /** Small pad under the last loaded commit (not a fake multi-page desert). */
 export const SPINE_STREAM_TAIL_ROWS = 3
 /**

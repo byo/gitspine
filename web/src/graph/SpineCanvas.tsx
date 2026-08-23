@@ -12,6 +12,7 @@ import {
   SUBJECT_MAX_W,
   SUBJECT_X,
   SYNC_X,
+  TOP_PAD,
   easeInOutCubic,
   hitTest,
   layoutSpine,
@@ -141,7 +142,8 @@ export function SpineCanvas({
   const navPinRef = useRef<{ oid: string; x: number; y: number } | null>(null)
   const streamEndRef = useRef(streamEndIndex)
   const hasMoreOlderRef = useRef(hasMoreOlder)
-  const loadSpinRafRef = useRef(0)
+  const loadChipRef = useRef<HTMLDivElement | null>(null)
+  const hintRef = useRef<HTMLDivElement | null>(null)
   nodesRef.current = nodes
   selectedRef.current = selectedOid
   propFocusRef.current = focusMergeOid
@@ -166,8 +168,14 @@ export function SpineCanvas({
     const wrap = wrapRef.current
     if (!canvas || !wrap) return
 
+    // Scroll container is .graph-pane (parent of this wrap).
+    const scroller = wrap.parentElement
     const dpr = window.devicePixelRatio || 1
-    const width = wrap.clientWidth
+    const width = wrap.clientWidth || scroller?.clientWidth || 0
+    const viewH = scroller?.clientHeight || wrap.clientHeight || 0
+    const scrollTop = scroller?.scrollTop ?? 0
+    if (width <= 0 || viewH <= 0) return
+
     const openT = openTRef.current
     const dFocus = displayFocusRef.current
     const dFeature = displayFeatureRef.current
@@ -188,19 +196,29 @@ export function SpineCanvas({
       pendingLoad,
     )
     layoutRef.current = layout
-    const height = Math.max(wrap.clientHeight, layout.totalHeight)
+    const contentH = Math.max(viewH, layout.totalHeight)
 
+    // Tall spacer for scrollbar; canvas is only the viewport (sticky).
+    // A full-content canvas (40k+ px) was the 2 FPS killer after large expands.
+    wrap.style.height = `${contentH}px`
     canvas.width = Math.floor(width * dpr)
-    canvas.height = Math.floor(height * dpr)
+    canvas.height = Math.floor(viewH * dpr)
     canvas.style.width = `${width}px`
-    canvas.style.height = `${height}px`
+    canvas.style.height = `${viewH}px`
 
     const ctx = canvas.getContext('2d')
     if (!ctx) return
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
     ctx.fillStyle = COLORS.bg
-    ctx.fillRect(0, 0, width, height)
+    ctx.fillRect(0, 0, width, viewH)
+
+    // Draw in content coordinates; only the visible band is on-screen.
+    ctx.save()
+    ctx.translate(0, -scrollTop)
+    const yMin = scrollTop - 80
+    const yMax = scrollTop + viewH + 80
+    const inView = (y: number) => y >= yMin && y <= yMax
 
     const pendingOid = featureLoadingRef.current ? propFocusRef.current : null
     // Dim as soon as expand is requested (before subgraph arrives).
@@ -217,6 +235,8 @@ export function SpineCanvas({
       const y1 = layout.yOf.get(drawNodes[i].commit.oid)
       const y2 = layout.yOf.get(drawNodes[i + 1].commit.oid)
       if (y1 == null || y2 == null) continue
+      // Skip rail segments fully above/below the viewport.
+      if (Math.max(y1, y2) < yMin || Math.min(y1, y2) > yMax) continue
       ctx.beginPath()
       ctx.strokeStyle = dimSpine ? COLORS.railDim : COLORS.rail
       ctx.lineWidth = compressT > 0.4 ? 2 : 3
@@ -369,7 +389,7 @@ export function SpineCanvas({
 
       for (const c of dFeature.commits) {
         const fy = layout.featureYs.get(c.oid)
-        if (fy == null) continue
+        if (fy == null || !inView(fy)) continue
         ctx.beginPath()
         ctx.fillStyle = COLORS.feature
         ctx.arc(LANE_X, fy, NODE_R - 1, 0, Math.PI * 2)
@@ -415,7 +435,7 @@ export function SpineCanvas({
         const oid = ext.commit.oid
         const ey = layout.externalYs.get(oid)
         const ex = layout.externalXs.get(oid)
-        if (ey == null || ex == null) continue
+        if (ey == null || ex == null || !inView(ey)) continue
         if (ex === RAIL_X) continue
         drawExternalNode(ctx, ex, ey, ext.role, sel === oid, false)
         const badge = roleBadge(ext.role)
@@ -442,6 +462,7 @@ export function SpineCanvas({
     for (const n of drawNodes) {
       const y = layout.yOf.get(n.commit.oid)
       if (y == null) continue
+      if (!inView(y)) continue
       const isPendingFocus = pendingOid === n.commit.oid
       const isFocus = (dFocus === n.commit.oid && openT > 0.2) || isPendingFocus
       const isAnchor = layout.anchors.has(n.commit.oid) || isPendingFocus
@@ -543,13 +564,14 @@ export function SpineCanvas({
       ctx.globalAlpha = 1
     }
 
-    // Loading indicator in the reserved gap under the merge (feature lane).
+    // Loading indicators: dashed stub on canvas (static) + CSS spinner overlay
+    // (animated without re-painting the whole graph every frame — critical on tall histories).
+    let loadOverlay: { left: number; top: number; message: string } | null = null
+
     if (pendingOid) {
       const py = layout.yOf.get(pendingOid)
       if (py != null) {
-        // Center of the loading placeholder gap (layout pushes the next spine commit down).
         const loadY = py + ROW + FEATURE_LOADING_GAP * 0.35
-        // Soft stub from merge into the open feature slot.
         ctx.beginPath()
         ctx.strokeStyle = 'rgba(126, 200, 227, 0.35)'
         ctx.lineWidth = 1.5
@@ -559,16 +581,15 @@ export function SpineCanvas({
         ctx.lineTo(LANE_X, loadY - 10)
         ctx.stroke()
         ctx.setLineDash([])
-
-        drawExpandSpinner(ctx, LANE_X, loadY, performance.now())
-        ctx.fillStyle = COLORS.feature
-        ctx.font = '12px system-ui, sans-serif'
-        ctx.fillText('Loading feature…', LANE_X + 16, loadY + 4)
+        loadOverlay = {
+          left: LANE_X + 16,
+          top: loadY,
+          message: 'Loading feature…',
+        }
       }
     }
 
-    // Jump-to-origin: same visual language as expand-loading (dashed stub + spinner + label).
-    // Pin last known position so the indicator survives when the feature collapses mid-jump.
+    // Jump-to-origin: same stub language as expand, spinner via DOM overlay.
     const navOid = navTargetRef.current
     if (navOid) {
       let pos: { x: number; y: number } | null = null
@@ -589,31 +610,42 @@ export function SpineCanvas({
         pos = { x: navPinRef.current.x, y: navPinRef.current.y }
       }
       if (pos) {
-        // Same geometry as expand: slot one row below the node, spinner on that column.
         const loadY = pos.y + ROW * 0.9
-        const loadX = pos.x
+        const onRail = Math.abs(pos.x - RAIL_X) < 2
+        const spinX = onRail ? LANE_X : pos.x
         ctx.beginPath()
         ctx.strokeStyle = 'rgba(126, 200, 227, 0.35)'
         ctx.lineWidth = 1.5
         ctx.setLineDash([3, 3])
-        // Soft stub from the clicked node into the loading slot.
-        if (Math.abs(pos.x - RAIL_X) < 2) {
-          // Spine node → out to lane then down (matches expand-from-merge).
+        if (onRail) {
           ctx.moveTo(RAIL_X + MERGE_R + 2, pos.y)
           ctx.lineTo(LANE_X, pos.y)
           ctx.lineTo(LANE_X, loadY - 10)
         } else {
           ctx.moveTo(pos.x, pos.y + NODE_R + 2)
-          ctx.lineTo(loadX, loadY - 10)
+          ctx.lineTo(spinX, loadY - 10)
         }
         ctx.stroke()
         ctx.setLineDash([])
+        loadOverlay = {
+          left: spinX + 16,
+          top: loadY,
+          message: expandStyleNavMessage(navMsgRef.current),
+        }
+      }
+    }
 
-        const spinX = Math.abs(pos.x - RAIL_X) < 2 ? LANE_X : loadX
-        drawExpandSpinner(ctx, spinX, loadY, performance.now())
-        ctx.fillStyle = COLORS.feature
-        ctx.font = '12px system-ui, sans-serif'
-        ctx.fillText(expandStyleNavMessage(navMsgRef.current), spinX + 16, loadY + 4)
+    // Position/hide the CSS loading chip (does not require continuous canvas RAF).
+    const chip = loadChipRef.current
+    if (chip) {
+      if (loadOverlay) {
+        chip.style.display = 'flex'
+        chip.style.left = `${loadOverlay.left}px`
+        chip.style.top = `${loadOverlay.top}px`
+        const label = chip.querySelector('.canvas-load-label')
+        if (label) label.textContent = loadOverlay.message
+      } else {
+        chip.style.display = 'none'
       }
     }
 
@@ -638,16 +670,24 @@ export function SpineCanvas({
 
     refRowsRef.current = refRows
 
-    ctx.fillStyle = COLORS.textDim
-    ctx.font = '11px system-ui, sans-serif'
-    const hint = navTargetRef.current
-      ? 'Locating commit… — Esc or Cancel to stop'
-      : pendingOid
-        ? 'Loading feature… — click the merge again (or Esc) to cancel'
-        : openT > 0.5
-          ? 'Feature expanded — click the same merge again (or Esc) to collapse · hover for messages'
-          : 'Main spine — click a merge commit to expand its feature history · hover for messages'
-    ctx.fillText(hint, 16, 20)
+    // End content-space drawing (undo scroll translate).
+    ctx.restore()
+
+    // Hint is a DOM band in content space (absolute in .canvas-wrap) so it
+    // scrolls away with the history and never paints on top of sticky canvas nodes.
+    const hintEl = hintRef.current
+    if (hintEl) {
+      const hint = navTargetRef.current
+        ? 'Locating commit… — Esc or Cancel to stop'
+        : pendingOid
+          ? 'Loading feature… — click the merge again (or Esc) to cancel'
+          : openT > 0.5
+            ? 'Feature expanded — click the same merge again (or Esc) to collapse · hover for messages'
+            : 'Main spine — click a merge commit to expand its feature history · hover for messages'
+      if (hintEl.textContent !== hint) hintEl.textContent = hint
+      // Hide once the first node has scrolled under the sticky top edge.
+      hintEl.style.opacity = scrollTop > TOP_PAD - 8 ? '0' : '1'
+    }
   }, [])
 
   const stopAnim = useCallback(() => {
@@ -746,48 +786,39 @@ export function SpineCanvas({
     }
   }, [focusMergeOid, feature, featureLoading, animateTo, paint])
 
-  // Spin the loading indicator while expand or jump-to-origin is in flight.
-  const spinBusy = featureLoading || Boolean(navTargetOid)
-  useEffect(() => {
-    if (!spinBusy) {
-      if (loadSpinRafRef.current) {
-        cancelAnimationFrame(loadSpinRafRef.current)
-        loadSpinRafRef.current = 0
-      }
-      return
-    }
-    const tick = () => {
-      paint()
-      loadSpinRafRef.current = requestAnimationFrame(tick)
-    }
-    loadSpinRafRef.current = requestAnimationFrame(tick)
-    return () => {
-      if (loadSpinRafRef.current) {
-        cancelAnimationFrame(loadSpinRafRef.current)
-        loadSpinRafRef.current = 0
-      }
-    }
-  }, [spinBusy, paint])
-
   useEffect(() => {
     paint()
     const onResize = () => paint()
     window.addEventListener('resize', onResize)
+
+    // Re-paint on scroll of .graph-pane (viewport-sized canvas).
+    const scroller = wrapRef.current?.parentElement
+    let scrollRaf = 0
+    const onScroll = () => {
+      if (scrollRaf) return
+      scrollRaf = requestAnimationFrame(() => {
+        scrollRaf = 0
+        paint()
+      })
+    }
+    scroller?.addEventListener('scroll', onScroll, { passive: true })
+
     return () => {
       window.removeEventListener('resize', onResize)
+      scroller?.removeEventListener('scroll', onScroll)
+      if (scrollRaf) cancelAnimationFrame(scrollRaf)
       stopAnim()
-      if (loadSpinRafRef.current) {
-        cancelAnimationFrame(loadSpinRafRef.current)
-        loadSpinRafRef.current = 0
-      }
     }
   }, [paint, stopAnim, nodes, selectedOid, streamEndIndex, hasMoreOlder, featureLoading, navTargetOid, navBusyMessage])
 
   const localPoint = (e: React.MouseEvent) => {
     const canvas = canvasRef.current
+    const wrap = wrapRef.current
     if (!canvas) return null
     const rect = canvas.getBoundingClientRect()
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top }
+    // Canvas is viewport-sized & sticky; hit-testing uses content Y.
+    const scrollTop = wrap?.parentElement?.scrollTop ?? 0
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top + scrollTop }
   }
 
   const onClick = (e: React.MouseEvent) => {
@@ -865,6 +896,15 @@ displayFeatureRef.current?.externals?.find((x) => x.commit.oid === hit.oid)
         onMouseMove={onMove}
         onMouseLeave={onLeave}
       />
+      {/* Content-top help band: lives in the wrap (scrolls away), above sticky canvas. */}
+      <div ref={hintRef} className="canvas-hint" aria-hidden>
+        Main spine — click a merge commit to expand its feature history · hover for messages
+      </div>
+      {/* CSS-animated spinner — avoids re-painting the full canvas every frame. */}
+      <div ref={loadChipRef} className="canvas-load-indicator" aria-hidden>
+        <span className="spinner" />
+        <span className="canvas-load-label">Loading…</span>
+      </div>
       {tooltip?.kind === 'refs' && (
         <div
           className="ref-tooltip"
@@ -900,29 +940,6 @@ displayFeatureRef.current?.externals?.find((x) => x.commit.oid === hit.oid)
       )}
     </div>
   )
-}
-
-/** Arc spinner used by expand-loading and jump-to-origin. */
-function drawExpandSpinner(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  nowMs: number,
-) {
-  const r = 7
-  const angle = (nowMs / 1000) * Math.PI * 2
-  ctx.save()
-  ctx.strokeStyle = COLORS.feature
-  ctx.lineWidth = 2.25
-  ctx.lineCap = 'round'
-  ctx.beginPath()
-  ctx.arc(x, y, r, angle, angle + Math.PI * 1.35)
-  ctx.stroke()
-  ctx.strokeStyle = 'rgba(126, 200, 227, 0.25)'
-  ctx.beginPath()
-  ctx.arc(x, y, r, 0, Math.PI * 2)
-  ctx.stroke()
-  ctx.restore()
 }
 
 /** Label next to the expand-style spinner (matches “Loading feature…” tone). */

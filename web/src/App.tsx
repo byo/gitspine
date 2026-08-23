@@ -9,7 +9,7 @@ import {
 import type { Commit, FeatureSubgraph, RepoMeta, SpineNode } from './api/types'
 import { SpineCanvas } from './graph/SpineCanvas'
 import type { LayoutHit } from './graph/layout'
-import { isExpandable, spineRowPitch } from './graph/layout'
+import { isExpandable, spineRowPitch, TOP_PAD } from './graph/layout'
 import {
   SPINE_PAGE,
   SPINE_WINDOW_MAX,
@@ -70,7 +70,7 @@ export default function App() {
 
   const contentHeightPx = useCallback((n = nodesRef.current.length) => {
     // Matches sequential window layout (TOP_PAD + n*row + pad).
-    return 48 + n * rowPx() + 48
+    return TOP_PAD + n * rowPx() + TOP_PAD
   }, [rowPx])
 
   const syncFlags = useCallback((windowNodes: SpineNode[]) => {
