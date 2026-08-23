@@ -91,6 +91,11 @@ type Repo struct {
 
 	// refsByOID caches ref tips → short names (built lazily, process-lifetime).
 	refsByOID map[string][]string
+
+	// First-parent spine cache for LocateCommit (tip → oid→spineIndex).
+	// Built once per process for a given integration tip; huge repos only pay once.
+	spineTip   string
+	spineIndex map[string]int
 }
 
 // Open validates path is a git worktree or .git dir.
@@ -443,6 +448,13 @@ func (r *Repo) ExpandFeature(ctx context.Context, mergeOID string, maxCommits in
 
 // LocateCommit finds where a commit sits relative to the integration spine and,
 // if it was landed by a feature merge, which merge introduced it.
+//
+// Performance: the previous scan walked every first-parent merge and ran two
+// merge-base processes per merge (minutes on the kernel). We now:
+//  1. cache the full first-parent spine index once per tip (~1s on kernel),
+//  2. use a single `rev-list --ancestry-path --merges --reverse` to list
+//     candidate introducing merges (~0.6s), then pick the first that lies on
+//     the first-parent spine.
 func (r *Repo) LocateCommit(ctx context.Context, oid, integrationRef string) (*CommitOrigin, error) {
 	full, err := r.revParse(ctx, oid)
 	if err != nil {
@@ -454,42 +466,55 @@ func (r *Repo) LocateCommit(ctx context.Context, oid, integrationRef string) (*C
 	}
 
 	out := &CommitOrigin{OID: full}
+	if err := r.ensureSpineCache(ctx, tip); err != nil {
+		return nil, err
+	}
 
 	// On first-parent rail?
-	if r.isFirstParentAncestor(ctx, full, tip) {
-		idx, err := r.firstParentIndex(ctx, full, tip)
-		if err == nil {
-			out.OnSpine = true
-			out.SpineIndex = &idx
-		}
+	if idx, ok := r.spineIndex[full]; ok {
+		out.OnSpine = true
+		out.SpineIndex = &idx
 		return out, nil
 	}
 
-	// Introducing landing merge: first first-parent merge M (newest→older) where
-	// oid is ancestor of M but not of M^1.
-	mergesOut, err := r.run(ctx, "rev-list", "--first-parent", "--merges", tip)
+	// Candidate introducing merges: ancestry-path from commit toward tip, oldest first.
+	// The first candidate that is itself on the first-parent spine is the landing
+	// merge that brought this commit onto the product history.
+	cands, err := r.run(ctx, "rev-list", "--ancestry-path", "--merges", "--reverse", full+".."+tip)
 	if err != nil {
+		// Commit may not be an ancestor of tip at all.
 		return out, nil
 	}
-	for _, m := range splitNonEmpty(mergesOut) {
-		// Need first parent of M.
-		p0, err := r.run(ctx, "rev-parse", m+"^")
-		if err != nil || p0 == "" {
-			continue
-		}
-		if !r.isAncestor(ctx, full, m) {
-			continue
-		}
-		if r.isAncestor(ctx, full, p0) {
-			continue // already on main before this merge
-		}
-		out.IntroducingMerge = m
-		if idx, err := r.firstParentIndex(ctx, m, tip); err == nil {
+	for _, m := range splitNonEmpty(cands) {
+		if idx, ok := r.spineIndex[m]; ok {
+			out.IntroducingMerge = m
 			out.IntroducingSpineIndex = &idx
+			return out, nil
 		}
-		return out, nil
 	}
 	return out, nil
+}
+
+// ensureSpineCache builds oid→spineIndex for the first-parent walk of tip.
+func (r *Repo) ensureSpineCache(ctx context.Context, tip string) error {
+	if tip == "" {
+		return fmt.Errorf("empty tip")
+	}
+	if r.spineTip == tip && r.spineIndex != nil {
+		return nil
+	}
+	raw, err := r.run(ctx, "rev-list", "--first-parent", tip)
+	if err != nil {
+		return err
+	}
+	oids := splitNonEmpty(raw)
+	idx := make(map[string]int, len(oids))
+	for i, oid := range oids {
+		idx[oid] = i
+	}
+	r.spineTip = tip
+	r.spineIndex = idx
+	return nil
 }
 
 // isAncestor reports whether a is an ancestor of b (or a == b).
@@ -502,56 +527,40 @@ func (r *Repo) isAncestor(ctx context.Context, a, b string) bool {
 
 // isFirstParentAncestor reports whether a lies on the first-parent chain of tip.
 func (r *Repo) isFirstParentAncestor(ctx context.Context, a, tip string) bool {
-	_, err := r.firstParentIndex(ctx, a, tip)
-	return err == nil
+	if err := r.ensureSpineCache(ctx, tip); err != nil {
+		return false
+	}
+	_, ok := r.spineIndex[a]
+	return ok
 }
 
 // firstParentIndex returns spineIndex of commit on the first-parent walk of tip
 // (0 = tip). Error if commit is not on that walk.
 func (r *Repo) firstParentIndex(ctx context.Context, commit, tip string) (int, error) {
-	if commit == tip {
-		return 0, nil
-	}
-	// Candidate index: how many first-parent steps from tip down to commit.
-	out, err := r.run(ctx, "rev-list", "--first-parent", "--count", commit+".."+tip)
-	if err != nil {
+	if err := r.ensureSpineCache(ctx, tip); err != nil {
 		return 0, err
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(out))
-	if err != nil {
-		return 0, err
+	if idx, ok := r.spineIndex[commit]; ok {
+		return idx, nil
 	}
-	// Confirm: skip n from tip along first-parent lands on commit.
-	check, err := r.run(ctx, "rev-list", "--first-parent", "--skip="+strconv.Itoa(n), "-1", tip)
-	if err != nil || check != commit {
-		return 0, fmt.Errorf("not on first-parent spine")
-	}
-	return n, nil
+	return 0, fmt.Errorf("not on first-parent spine")
 }
 
 // firstParentSpineSet returns OIDs on the first-parent walk from tip (newest→oldest).
 func (r *Repo) firstParentSpineSet(ctx context.Context, tip string) map[string]struct{} {
 	out := make(map[string]struct{})
-	if tip == "" {
-		return out
-	}
-	raw, err := r.run(ctx, "rev-list", "--first-parent", "--max-count=200000", tip)
-	if err != nil {
-		cur := tip
-		for i := 0; i < 50000; i++ {
-			if _, seen := out[cur]; seen {
-				break
-			}
-			out[cur] = struct{}{}
-			p, err := r.run(ctx, "rev-parse", cur+"^")
-			if err != nil || p == "" || p == cur {
-				break
-			}
-			cur = p
+	if err := r.ensureSpineCache(ctx, tip); err != nil {
+		// Fall back to a bounded walk if cache build fails.
+		raw, err := r.run(ctx, "rev-list", "--first-parent", "--max-count=200000", tip)
+		if err != nil {
+			return out
+		}
+		for _, oid := range splitNonEmpty(raw) {
+			out[oid] = struct{}{}
 		}
 		return out
 	}
-	for _, oid := range splitNonEmpty(raw) {
+	for oid := range r.spineIndex {
 		out[oid] = struct{}{}
 	}
 	return out
