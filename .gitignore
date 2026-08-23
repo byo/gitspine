@@ -2,11 +2,21 @@
 /bin/
 /dist/
 *.exe
+/spine
+/gitspine
 
 # Node
-node_modules/
 web/node_modules/
 web/dist/
+
+# Vite production output copied here for go:embed (`make web` / `make ensure-ui`).
+# Fully ignored so hashed assets never land in git. Placeholder lives in
+# internal/ui/placeholder/ and is copied into dist when missing.
+internal/ui/dist/
+
+# Fixture / demo repos
+/testdata/fixture-repo/
+/testdata/demo-repo/
 
 # IDE / OS
 .idea/

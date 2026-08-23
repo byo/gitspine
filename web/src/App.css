@@ -1,0 +1,511 @@
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+.app {
+  height: 100%;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden; /* scroll lives in .graph-pane, not the document */
+  background: #0f1419;
+  color: #e6ecf5;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.65rem 1rem;
+  border-bottom: 1px solid #243040;
+  background: #121a22;
+  flex-wrap: wrap;
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.logo {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  font-size: 1.1rem;
+  color: #f0c674;
+}
+
+.tagline {
+  color: #8b9bb0;
+  font-size: 0.85rem;
+}
+
+.repo-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  color: #a8b8cc;
+  flex: 1;
+  min-width: 0;
+}
+
+.repo-meta .path {
+  opacity: 0.65;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repo-meta .dot {
+  opacity: 0.5;
+}
+
+.actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr minmax(260px, 320px);
+  min-height: 0; /* critical: allow children to shrink and scroll */
+  overflow: hidden;
+}
+
+.graph-pane {
+  position: relative;
+  overflow: auto; /* this is the scroll container for infinite load */
+  min-height: 0;
+  height: 100%;
+  border-right: 1px solid #243040;
+}
+
+.canvas-wrap {
+  position: relative;
+  /* Height is set in JS to content length (scrollbar). Canvas is sticky viewport-sized. */
+  width: 100%;
+}
+
+.canvas-wrap canvas {
+  display: block;
+  cursor: pointer;
+  position: sticky;
+  top: 0;
+  left: 0;
+  z-index: 1;
+}
+
+/*
+ * Instructional band at content y≈0. Absolute in .canvas-wrap so it scrolls away
+ * with history; z-index above sticky canvas so it is not covered at scrollTop=0.
+ * Solid bg matches canvas so commit subjects never show through the text.
+ */
+.canvas-hint {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  padding: 10px 16px 8px;
+  box-sizing: border-box;
+  pointer-events: none;
+  color: rgba(160, 172, 188, 0.85);
+  font-size: 11px;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: linear-gradient(
+    to bottom,
+    #0f1419 0%,
+    #0f1419 70%,
+    rgba(15, 20, 25, 0) 100%
+  );
+  transition: opacity 0.12s ease;
+}
+
+/* Positioned by SpineCanvas paint() in content coords; CSS spins (no canvas RAF). */
+.canvas-load-indicator {
+  position: absolute;
+  display: none;
+  align-items: center;
+  gap: 0.4rem;
+  transform: translateY(-50%);
+  pointer-events: none;
+  z-index: 4;
+  color: #7ec8e3;
+  font-size: 12px;
+  font-family: system-ui, sans-serif;
+  white-space: nowrap;
+  text-shadow:
+    0 0 3px #0f1419,
+    0 0 6px #0f1419,
+    0 1px 2px #0f1419;
+}
+
+.canvas-load-indicator .spinner {
+  width: 0.85rem;
+  height: 0.85rem;
+  border-width: 2px;
+}
+
+.ref-tooltip {
+  position: absolute;
+  z-index: 5;
+  max-width: 280px;
+  max-height: 220px;
+  overflow: auto;
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  border: 1px solid rgba(163, 113, 247, 0.45);
+  background: rgba(18, 22, 32, 0.96);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+  color: #e6ecf5;
+  font-size: 0.8rem;
+}
+
+.ref-tooltip-title {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8b9bb0;
+  margin-bottom: 0.35rem;
+}
+
+.ref-tooltip ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ref-tooltip li {
+  padding: 0.12rem 0;
+  word-break: break-all;
+}
+
+.ref-tooltip code {
+  font-size: 0.85em;
+  color: #d6c6ff;
+}
+
+.commit-tooltip {
+  max-width: 360px;
+}
+
+.commit-tooltip-subject {
+  font-size: 0.88rem;
+  line-height: 1.35;
+  color: #e6ecf5;
+  margin: 0.15rem 0 0.35rem;
+  word-break: break-word;
+}
+
+.commit-tooltip-meta {
+  font-size: 0.75rem;
+  color: #8b9bb0;
+}
+
+.detail {
+  padding: 1rem;
+  overflow: auto;
+  background: #111820;
+}
+
+.detail h2 {
+  margin: 0 0 0.75rem;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #8b9bb0;
+}
+
+.detail h3 {
+  margin: 0.35rem 0 0.75rem;
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.muted {
+  color: #8b9bb0;
+  line-height: 1.5;
+  font-size: 0.92rem;
+}
+
+.muted.small {
+  font-size: 0.8rem;
+}
+
+.banner {
+  padding: 0.75rem 1rem;
+  background: #1a2836;
+  color: #c5d4e8;
+}
+
+.banner.error {
+  background: #3a1f24;
+  color: #ffb4b0;
+}
+
+.banner.warn {
+  margin: 0.6rem 0;
+  padding: 0.5rem 0.65rem;
+  border-radius: 6px;
+  background: #3a3218;
+  color: #e6d48a;
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+/* Sticky so it stays visible while a slow jump/expand runs on huge repos. */
+.banner.nav-busy {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  background: #1a2e3a;
+  border-bottom: 1px solid #2a4a5a;
+  color: #b8d9ec;
+}
+
+.banner.nav-busy .nav-busy-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.banner.nav-busy .nav-busy-hint {
+  font-size: 0.78rem;
+  color: #8b9bb0;
+  white-space: nowrap;
+}
+
+.btn {
+  border: 1px solid #3a4d63;
+  background: #1a2430;
+  color: #e6ecf5;
+  border-radius: 6px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.btn:hover {
+  background: #243244;
+}
+
+.btn.ghost {
+  background: transparent;
+}
+
+.btn.primary {
+  background: #2a4a62;
+  border-color: #3d6f94;
+  color: #d6eefc;
+}
+
+/* Sticks to the bottom of the graph viewport (not after the full canvas). */
+.load-more-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 4;
+  margin-top: auto;
+  padding: 0.4rem 1rem;
+  text-align: center;
+  font-size: 0.8rem;
+  letter-spacing: 0.02em;
+  color: #9aafc4;
+  background: linear-gradient(
+    180deg,
+    rgba(15, 20, 25, 0) 0%,
+    rgba(15, 20, 25, 0.88) 28%,
+    rgba(18, 26, 34, 0.96) 100%
+  );
+  border-top: 1px solid #243040;
+  pointer-events: none;
+  user-select: none;
+}
+
+.commit-detail .oid {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.badge {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  background: #3a3020;
+  color: #f0c674;
+}
+
+.commit-detail dl {
+  display: grid;
+  grid-template-columns: 5rem 1fr;
+  gap: 0.35rem 0.5rem;
+  font-size: 0.88rem;
+  margin: 0.75rem 0 1rem;
+}
+
+.commit-detail dt {
+  color: #8b9bb0;
+}
+
+.commit-detail dd {
+  margin: 0;
+}
+
+.parent-role {
+  color: #8b9bb0;
+  font-size: 0.8rem;
+}
+
+.body {
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  background: #0c1016;
+  padding: 0.6rem;
+  border-radius: 6px;
+  color: #c5d0de;
+  max-height: 160px;
+  overflow: auto;
+}
+
+.feature-summary {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid #243040;
+}
+
+.feature-loading-row {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin: 0.35rem 0 0.5rem;
+}
+
+.feature-loading-row p {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #c5d4e8;
+}
+
+.spinner {
+  width: 1rem;
+  height: 1rem;
+  border-radius: 50%;
+  border: 2px solid rgba(126, 200, 227, 0.25);
+  border-top-color: #7ec8e3;
+  animation: gitspine-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes gitspine-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+    border-top-color: #7ec8e3;
+    opacity: 0.85;
+  }
+}
+
+.feature-summary h2.sub {
+  margin-top: 1.1rem;
+}
+
+.role-base {
+  color: #e3b341;
+}
+
+.role-sync {
+  color: #3fb950;
+}
+
+.role-integration {
+  color: #a371f7;
+}
+
+.role-pill {
+  display: inline-block;
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  vertical-align: middle;
+  margin-right: 0.15rem;
+}
+
+.role-pill.role-base {
+  background: rgba(227, 179, 65, 0.15);
+  color: #e3b341;
+}
+
+.role-pill.role-synced {
+  background: rgba(63, 185, 80, 0.12);
+  color: #3fb950;
+}
+
+.role-pill.role-integration {
+  background: rgba(163, 113, 247, 0.15);
+  color: #a371f7;
+}
+
+.feat-list {
+  margin: 0.5rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.85rem;
+}
+
+.feat-list li {
+  margin: 0.25rem 0;
+}
+
+button.link {
+  background: none;
+  border: none;
+  color: #c5d4e8;
+  cursor: pointer;
+  text-align: left;
+  padding: 0;
+  font: inherit;
+}
+
+button.link:hover,
+button.link.active {
+  color: #7ec8e3;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+}
+
+@media (max-width: 900px) {
+  .main {
+    grid-template-columns: 1fr;
+  }
+  .graph-pane {
+    border-right: none;
+    border-bottom: 1px solid #243040;
+    min-height: 55vh;
+  }
+}
