@@ -1,4 +1,4 @@
-.PHONY: fixture ensure-ui web dev-api dev-web dev test build build-go clean-ui
+.PHONY: fixture ensure-ui web dev-api dev-web dev test build build-go clean-ui lint vet
 
 FIXTURE ?= testdata/fixture-repo
 REPO ?= $(FIXTURE)
@@ -53,6 +53,14 @@ build: web build-go
 clean-ui:
 	rm -rf $(UI_DIST)
 	@$(MAKE) ensure-ui
+
+lint: ensure-ui
+	golangci-lint run ./...
+	cd web && npm run lint
+
+vet: ensure-ui
+	go vet ./...
+	cd web && npm run typecheck
 
 test: ensure-ui
 	go test ./...

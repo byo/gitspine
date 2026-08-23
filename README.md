@@ -16,6 +16,17 @@ Full product design: [`docs/DESIGN.md`](docs/DESIGN.md).
 - Node 20+ (for UI build / Vite dev)
 - `git` on `PATH`
 
+## Install
+
+Download a release archive from [GitHub Releases](https://github.com/byo/gitspine/releases). Binaries are published for Linux, macOS, and Windows (amd64 and arm64) when a version tag is pushed.
+
+```bash
+tar -xzf gitspine_*_Linux_x86_64.tar.gz   # or Darwin / Windows zip
+./gitspine -repo /path/to/repo
+```
+
+Build from source instead: `make build`.
+
 ## Single binary (API + UI)
 
 Production path embeds the Vite build with `go:embed` and serves everything from one process:
@@ -43,6 +54,7 @@ Useful flags:
 | `-listen` | Bind address (default `127.0.0.1:8080`) |
 | `-dev` | Enable CORS for Vite on another origin |
 | `-no-ui` | API only (skip embedded SPA) |
+| `-version` | Print version and exit |
 
 `make build-go` recompiles only Go using whatever is currently in `internal/ui/dist`.  
 `make web` rebuilds the SPA into that directory for embedding.
@@ -110,6 +122,27 @@ web/                 React + canvas UI (Vite source)
 scripts/             fixture generator
 docs/DESIGN.md       architecture & PR plan
 ```
+
+## Checks
+
+```bash
+make lint    # golangci-lint + oxlint
+make vet     # go vet + tsc -b
+make test    # go test ./... (needs `make fixture` for gitrepo tests)
+```
+
+CI runs these on every push and pull request. Tests run on Linux, macOS, and Windows.
+
+## Release
+
+Push a semver tag starting with `v` (for example `v0.1.0`). GitHub Actions runs [GoReleaser](https://goreleaser.com/), which builds the production UI, cross-compiles binaries, and publishes a GitHub Release:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Prerelease tags such as `v0.1.0-rc.1` are marked as GitHub prereleases automatically.
 
 ## Not in this spike
 
