@@ -601,7 +601,7 @@ func (r *Repo) commitsByOID(ctx context.Context, oids []string) (map[string]Comm
 		// Fallback: empty map, caller may GetCommit individually.
 		return out, nil
 	}
-	for _, rec := range strings.Split(raw, "\x1e") {
+	for rec := range strings.SplitSeq(raw, "\x1e") {
 		rec = strings.TrimSpace(rec)
 		if rec == "" {
 			continue
@@ -682,7 +682,7 @@ func parseDecorations(d string) []string {
 		return nil
 	}
 	var refs []string
-	for _, part := range strings.Split(d, ", ") {
+	for part := range strings.SplitSeq(d, ", ") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
@@ -781,14 +781,14 @@ func hintTitle(subject string) string {
 	s := subject
 	if i := strings.Index(s, "'"); i >= 0 {
 		rest := s[i+1:]
-		if j := strings.Index(rest, "'"); j >= 0 {
-			return rest[:j]
+		if before, _, ok := strings.Cut(rest, "'"); ok {
+			return before
 		}
 	}
 	if i := strings.Index(s, "\""); i >= 0 {
 		rest := s[i+1:]
-		if j := strings.Index(rest, "\""); j >= 0 {
-			return rest[:j]
+		if before, _, ok := strings.Cut(rest, "\""); ok {
+			return before
 		}
 	}
 	// fallback: trim Merge prefix
@@ -836,7 +836,7 @@ func splitNonEmpty(s string) []string {
 		return nil
 	}
 	var out []string
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" {
 			out = append(out, line)
