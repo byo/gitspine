@@ -5,9 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/byo/gitspine/internal/api"
 	"github.com/byo/gitspine/internal/gitrepo"
@@ -18,7 +20,14 @@ func main() {
 	ref := flag.String("ref", "", "integration ref (default: HEAD branch / main / master)")
 	listen := flag.String("listen", "127.0.0.1:8080", "listen address")
 	logLevel := flag.String("log-level", "info", "log level (debug|info|warn|error)")
+	dev := flag.Bool("dev", false, "dev mode: enable CORS for Vite (http://127.0.0.1:5173)")
+	noUI := flag.Bool("no-ui", false, "serve API only (skip embedded web UI)")
 	flag.Parse()
+
+	// Env override for CI/scripts: GITSPINE_DEV=1
+	if v := strings.TrimSpace(os.Getenv("GITSPINE_DEV")); v == "1" || strings.EqualFold(v, "true") {
+		*dev = true
+	}
 
 	var level slog.Level
 	switch *logLevel {
@@ -50,14 +59,28 @@ func main() {
 		log.Error("repo meta", "err", err)
 		os.Exit(1)
 	}
+
+	serveUI := !*noUI
 	log.Info("gitspine starting",
 		"repo", meta["path"],
 		"ref", meta["integrationRef"],
 		"tip", meta["shortOid"],
 		"listen", *listen,
+		"ui", serveUI,
+		"dev_cors", *dev,
 	)
 
-	srv := &api.Server{Repo: repo, Ref: *ref, Log: log, DevCORS: true}
+	if host, _, err := net.SplitHostPort(*listen); err == nil && host != "" && host != "127.0.0.1" && host != "localhost" && host != "::1" {
+		log.Warn("listening on non-loopback address; local git data may be exposed", "listen", *listen)
+	}
+
+	srv := &api.Server{
+		Repo:    repo,
+		Ref:     *ref,
+		Log:     log,
+		DevCORS: *dev,
+		ServeUI: serveUI,
+	}
 	if err := http.ListenAndServe(*listen, srv.Handler()); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
 		os.Exit(1)

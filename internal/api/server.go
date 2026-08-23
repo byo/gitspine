@@ -9,14 +9,20 @@ import (
 	"time"
 
 	"github.com/byo/gitspine/internal/gitrepo"
+	"github.com/byo/gitspine/internal/ui"
 )
 
-// Server serves GitSpine JSON APIs for a single local repo.
+// Server serves GitSpine JSON APIs (and optionally the embedded SPA) for a local repo.
 type Server struct {
-	Repo   *gitrepo.Repo
-	Ref    string // optional override
-	Log    *slog.Logger
+	Repo *gitrepo.Repo
+	Ref  string // optional override
+	Log  *slog.Logger
+	// DevCORS enables permissive CORS for the Vite dev server (different origin).
+	// Leave false for the single-binary production path (same origin).
 	DevCORS bool
+	// ServeUI attaches the go:embed SPA on non-API routes. Default true.
+	// Set false for API-only (e.g. when using Vite separately without wanting static).
+	ServeUI bool
 }
 
 func (s *Server) Handler() http.Handler {
@@ -28,6 +34,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+
+	if s.ServeUI {
+		// Catch-all under "/"; more specific /api/... patterns above take precedence.
+		mux.Handle("/", ui.Handler())
+	}
+
 	return s.middleware(mux)
 }
 
@@ -123,6 +135,7 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 	c.Refs = nil // optional; could fill
 	writeJSON(w, http.StatusOK, c)
 }
+
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")

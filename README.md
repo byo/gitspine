@@ -13,31 +13,67 @@ Full product design: [`docs/DESIGN.md`](docs/DESIGN.md).
 ## Requirements
 
 - Go 1.22+
-- Node 20+
+- Node 20+ (for UI build / Vite dev)
 - `git` on `PATH`
 
-## Quick start
+## Single binary (API + UI)
+
+Production path embeds the Vite build with `go:embed` and serves everything from one process:
 
 ```bash
-# 1) sample history with proper merges
-make fixture
-
-# 2) API (terminal A)
-go run ./cmd/gitspine -repo testdata/fixture-repo -listen 127.0.0.1:8080
-
-# 3) UI (terminal B)
-cd web && npm install && npm run dev
+make fixture          # sample merge history
+make build            # npm run build → internal/ui/dist + go build → bin/gitspine
+./bin/gitspine -repo testdata/fixture-repo -listen 127.0.0.1:8080
 ```
 
-Open **http://127.0.0.1:5173** (Vite proxies `/api` → `:8080`).
+Open **http://127.0.0.1:8080/** — same origin for UI and `/api`.
 
 Against your own repo:
 
 ```bash
-go run ./cmd/gitspine -repo /path/to/repo -listen 127.0.0.1:8080
+./bin/gitspine -repo /path/to/repo -listen 127.0.0.1:8080
 ```
 
-Optional: `-ref main` if HEAD is not the integration branch you want.
+Useful flags:
+
+| Flag | Meaning |
+|------|---------|
+| `-repo` | Local git path (default `.`) |
+| `-ref` | Integration branch if HEAD is not the one you want |
+| `-listen` | Bind address (default `127.0.0.1:8080`) |
+| `-dev` | Enable CORS for Vite on another origin |
+| `-no-ui` | API only (skip embedded SPA) |
+
+`make build-go` recompiles only Go using whatever is currently in `internal/ui/dist`.  
+`make web` rebuilds the SPA into that directory for embedding.
+
+## Development (split processes)
+
+Hot-reload UI with Vite; Go API with CORS on:
+
+```bash
+# Terminal A — API only + CORS
+make dev-api REPO=testdata/fixture-repo
+
+# Terminal B — Vite
+make dev-web
+```
+
+Open **http://127.0.0.1:5173** (Vite proxies `/api` → `:8080`).
+
+Equivalent:
+
+```bash
+go run ./cmd/gitspine -repo testdata/fixture-repo -listen 127.0.0.1:8080 -dev -no-ui
+cd web && npm run dev
+```
+
+You can also run the binary with UI while iterating on the API:
+
+```bash
+make web && go run ./cmd/gitspine -repo testdata/fixture-repo
+# open http://127.0.0.1:8080/
+```
 
 ## How to read the view
 
@@ -59,6 +95,7 @@ Optional: `-ref main` if HEAD is not the integration branch you want.
 | GET | `/api/v1/spine?offset=&limit=` | First-parent page + capsules |
 | GET | `/api/v1/features/{oid}/expand` | Merge-range feature subgraph |
 | GET | `/api/v1/commits/{oid}` | Single commit |
+| GET | `/api/health` | Liveness |
 
 Feature membership is plain git: commits reachable from non-first parents of `M`, excluding ancestors of the first parent.
 
@@ -68,7 +105,8 @@ Feature membership is plain git: commits reachable from non-first parents of `M`
 cmd/gitspine/        HTTP entrypoint
 internal/gitrepo/    local git via CLI (thin)
 internal/api/        JSON handlers
-web/                 React + canvas UI
+internal/ui/         go:embed SPA (dist/ filled by Vite)
+web/                 React + canvas UI (Vite source)
 scripts/             fixture generator
 docs/DESIGN.md       architecture & PR plan
 ```

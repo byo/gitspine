@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GitSpine</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        background: #0f1419;
+        color: #e6ecf5;
+        display: grid;
+        place-items: center;
+        min-height: 100vh;
+        margin: 0;
+      }
+      main {
+        max-width: 36rem;
+        padding: 2rem;
+        line-height: 1.5;
+      }
+      code {
+        background: #1a2430;
+        padding: 0.1rem 0.35rem;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>GitSpine</h1>
+      <p>
+        This binary was built without a production web UI. From the repo root run
+        <code>make build</code> (or <code>make web</code> then rebuild) to embed the
+        React app via <code>go:embed</code>.
+      </p>
+      <p>API is available under <code>/api/v1/*</code> and <code>/api/health</code>.</p>
+    </main>
+  </body>
+</html>
